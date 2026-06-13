@@ -19,7 +19,6 @@ Float is acceptable for this MVP layer.
 
 import asyncio
 import json
-import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -42,6 +41,9 @@ COMBINED_FILE  = os.path.join(DATA_DIR, "combined_1s_dna_btcusdt.jsonl")
 # Exponential backoff in seconds; last value is used for all subsequent retries
 BACKOFF_DELAYS = [1, 2, 4, 8, 16, 30]
 
+# Grace period: ms after window_end_ts before finalizing (absorbs network jitter)
+GRACE_PERIOD_MS = 300
+
 
 # ── Side enums ───────────────────────────────────────────────────────────────
 # Trade side (BUY/SELL) and depth side (BID/ASK/NEUTRAL) are intentionally
@@ -61,13 +63,17 @@ class DepthSide(str, Enum):
 # ── Shared state ─────────────────────────────────────────────────────────────
 @dataclass
 class SharedState:
-    trade_buffer:     list = field(default_factory=list)
-    depth_buffer:     list = field(default_factory=list)
-    trade_connected:  bool = False
-    depth_connected:  bool = False
-    first_trade_seen: bool = False
-    first_depth_seen: bool = False
-    last_close_price: Optional[float] = None
+    # Per-event-time buckets keyed by window_start_ts.
+    # window_start_ts = floor(event_time_ms / 1000) * 1000
+    buckets:           dict  = field(default_factory=dict)
+    # Recently-finalized window_start_ts values for late-event detection.
+    # Pruned to the last 30 seconds on each finalization.
+    finalized_windows: set   = field(default_factory=set)
+    trade_connected:   bool  = False
+    depth_connected:   bool  = False
+    first_trade_seen:  bool  = False
+    first_depth_seen:  bool  = False
+    last_close_price:  Optional[float] = None
 
 
 _state = SharedState()
@@ -356,11 +362,23 @@ async def _run_trade_stream() -> None:
                     if ev["price"] <= 0:
                         # Skip anomalous zero/negative price events (Binance data guard)
                         continue
+                    # Bucket by event's own timestamp T, not by arrival time
+                    wts = (ev["time_ms"] // 1000) * 1000
                     async with _lock:
-                        _state.trade_buffer.append(ev)
-                        if not _state.first_trade_seen:
-                            _state.first_trade_seen = True
-                            print("[Trade] First event received.")
+                        if wts in _state.finalized_windows:
+                            print(
+                                f"[LATE EVENT] Trade skipped: "
+                                f"event_time={ev['time_ms']}, "
+                                f"window_start_ts={wts} already finalized"
+                            )
+                        else:
+                            bucket = _state.buckets.setdefault(
+                                wts, {"trades": [], "depths": []}
+                            )
+                            bucket["trades"].append(ev)
+                            if not _state.first_trade_seen:
+                                _state.first_trade_seen = True
+                                print("[Trade] First event received.")
         except Exception as exc:
             async with _lock:
                 _state.trade_connected = False
@@ -380,17 +398,26 @@ async def _run_depth_stream() -> None:
                 backoff_idx = 0
                 print("[Depth] Connected.")
                 async for raw in ws:
-                    msg = json.loads(raw)
-                    ev  = {
-                        "time_ms": int(msg["E"]),
-                        "bids":    msg["b"],
-                        "asks":    msg["a"],
-                    }
+                    msg     = json.loads(raw)
+                    time_ms = int(msg["E"])
+                    ev      = {"time_ms": time_ms, "bids": msg["b"], "asks": msg["a"]}
+                    # Bucket by event's own timestamp E, not by arrival time
+                    wts = (time_ms // 1000) * 1000
                     async with _lock:
-                        _state.depth_buffer.append(ev)
-                        if not _state.first_depth_seen:
-                            _state.first_depth_seen = True
-                            print("[Depth] First event received.")
+                        if wts in _state.finalized_windows:
+                            print(
+                                f"[LATE EVENT] Depth skipped: "
+                                f"event_time={time_ms}, "
+                                f"window_start_ts={wts} already finalized"
+                            )
+                        else:
+                            bucket = _state.buckets.setdefault(
+                                wts, {"trades": [], "depths": []}
+                            )
+                            bucket["depths"].append(ev)
+                            if not _state.first_depth_seen:
+                                _state.first_depth_seen = True
+                                print("[Depth] First event received.")
         except Exception as exc:
             async with _lock:
                 _state.depth_connected = False
@@ -400,8 +427,15 @@ async def _run_depth_stream() -> None:
             backoff_idx = min(backoff_idx + 1, len(BACKOFF_DELAYS) - 1)
 
 
-# ── 1-second drift-compensated scheduler ─────────────────────────────────────
+# ── Event-time-bucketed scheduler ────────────────────────────────────────────
 async def _scheduler() -> None:
+    """Finalize windows based on event timestamps, not wall-clock drain time.
+
+    Each 50 ms poll finds all pending buckets whose grace period has expired
+    (wall_clock >= window_end_ts + GRACE_PERIOD_MS) and emits them in order.
+    Gap windows between consecutive emitted windows are filled with carry-forward
+    records so the JSONL stream remains gapless.
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # Block until at least one trade AND one depth event have been received
@@ -412,62 +446,96 @@ async def _scheduler() -> None:
         if ready:
             break
         await asyncio.sleep(0.05)
-    print("Warm-up complete. Starting 1-second scheduler.")
+    print("Warm-up complete. Starting event-time scheduler.")
 
-    # Align to next whole-second boundary; scheduler self-corrects for drift
-    now       = time.time()
-    next_tick = math.ceil(now)
-    await asyncio.sleep(next_tick - now)
+    # Tracks the last window_start_ts that was successfully finalized.
+    # Once set, all subsequent windows (including gaps) are emitted in order.
+    last_finalized_ts: Optional[int] = None
 
     while True:
-        current_tick = next_tick
-        next_tick    = current_tick + 1.0
+        await asyncio.sleep(0.05)
 
-        window_end_ts   = int(round(current_tick * 1000))
-        window_start_ts = window_end_ts - 1000
+        now_ms = int(time.time() * 1000)
 
-        # Atomically snapshot and drain both buffers
+        # Highest window_start_ts whose grace period has fully expired:
+        #   wts + 1000 + GRACE_PERIOD_MS <= now_ms
+        #   wts <= now_ms - 1000 - GRACE_PERIOD_MS
+        check_to = ((now_ms - 1000 - GRACE_PERIOD_MS) // 1000) * 1000
+
         async with _lock:
-            trades = list(_state.trade_buffer)
-            depths = list(_state.depth_buffer)
-            _state.trade_buffer.clear()
-            _state.depth_buffer.clear()
+            bucket_keys = set(_state.buckets.keys())
             t_disc = not _state.trade_connected
             d_disc = not _state.depth_connected
-            carry  = _state.last_close_price
 
-        candle = build_candle_dna(trades, window_start_ts, window_end_ts, carry, t_disc)
+        if last_finalized_ts is not None:
+            # Emit every window from (last_finalized_ts + 1000) up to check_to.
+            # Windows with no bucket entry become carry-forward records.
+            check_from = last_finalized_ts + 1000
+            windows_to_finalize = (
+                list(range(check_from, check_to + 1000, 1000))
+                if check_to >= check_from else []
+            )
+        else:
+            # First pass: start from the earliest ready bucket and fill
+            # any gaps between ready buckets (no gap-filling before the first
+            # bucket since there is no prior context).
+            ready_buckets = sorted(wts for wts in bucket_keys if wts <= check_to)
+            if ready_buckets:
+                windows_to_finalize = list(
+                    range(ready_buckets[0], ready_buckets[-1] + 1000, 1000)
+                )
+            else:
+                windows_to_finalize = []
 
-        if candle is None:
-            # Theoretically unreachable after warm-up; skip silently
-            await asyncio.sleep(max(0.0, next_tick - time.time()))
-            continue
+        for wts in windows_to_finalize:
+            window_end_ts = wts + 1000
 
-        # Update carry-forward price for future no-trade windows
-        if candle["has_trade"]:
             async with _lock:
-                _state.last_close_price = candle["close"]["price"]
+                # Pop the bucket (returns empty dict if it was a gap window)
+                bucket = _state.buckets.pop(wts, {"trades": [], "depths": []})
+                # Mark as finalized for late-event detection
+                _state.finalized_windows.add(wts)
+                # Prune the finalized set to the last 30 seconds
+                cutoff = wts - 30_000
+                _state.finalized_windows = {
+                    w for w in _state.finalized_windows if w > cutoff
+                }
+                carry  = _state.last_close_price
+                t_disc = not _state.trade_connected
+                d_disc = not _state.depth_connected
 
-        footprint = build_footprint_dna(trades, window_start_ts, window_end_ts)
-        depth     = build_depth_dna(depths, window_start_ts, window_end_ts, d_disc)
-        combined  = build_combined_dna(
-            candle, footprint, depth,
-            window_start_ts, window_end_ts,
-            t_disc or d_disc,
-        )
+            trades = bucket["trades"]
+            depths = bucket["depths"]
 
-        _print_dna("CANDLE DNA",      candle)
-        _print_dna("FOOTPRINT DNA",   footprint)
-        _print_dna("DEPTH DNA",       depth)
-        _print_dna("COMBINED 1S DNA", combined)
+            candle = build_candle_dna(trades, wts, window_end_ts, carry, t_disc)
+            if candle is None:
+                # Pre-warm-up gap; no carry price yet — skip silently
+                last_finalized_ts = wts
+                continue
 
-        _append_jsonl(CANDLE_FILE,    candle)
-        _append_jsonl(FOOTPRINT_FILE, footprint)
-        _append_jsonl(DEPTH_FILE,     depth)
-        _append_jsonl(COMBINED_FILE,  combined)
+            if candle["has_trade"]:
+                async with _lock:
+                    _state.last_close_price = candle["close"]["price"]
 
-        # Drift-compensated sleep until next boundary
-        await asyncio.sleep(max(0.0, next_tick - time.time()))
+            footprint = build_footprint_dna(trades, wts, window_end_ts)
+            depth     = build_depth_dna(depths, wts, window_end_ts, d_disc)
+            combined  = build_combined_dna(
+                candle, footprint, depth,
+                wts, window_end_ts,
+                t_disc or d_disc,
+            )
+
+            _print_dna("CANDLE DNA",      candle)
+            _print_dna("FOOTPRINT DNA",   footprint)
+            _print_dna("DEPTH DNA",       depth)
+            _print_dna("COMBINED 1S DNA", combined)
+
+            _append_jsonl(CANDLE_FILE,    candle)
+            _append_jsonl(FOOTPRINT_FILE, footprint)
+            _append_jsonl(DEPTH_FILE,     depth)
+            _append_jsonl(COMBINED_FILE,  combined)
+
+            last_finalized_ts = wts
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
