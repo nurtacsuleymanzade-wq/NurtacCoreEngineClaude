@@ -8,6 +8,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 |---|---|---|
 | Layer-0 | `main.py` | Live WebSocket → 1S DNA (Candle, Footprint, Depth, Combined) |
 | Layer-1 | `rolling_window_engine.py` | Combined 1S → Rolling 3S / 5S / 15S DNA |
+| Layer-2 | `aligned_candle_engine.py` | Combined 1S → Aligned 1M / 5M / 15M / 1H / 4H / 1D DNA |
 
 ## Layer-0 Output Files
 
@@ -17,6 +18,17 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Footprint DNA | `data/footprint_dna_btcusdt.jsonl` |
 | Depth DNA | `data/depth_dna_btcusdt.jsonl` |
 | Combined 1S DNA | `data/combined_1s_dna_btcusdt.jsonl` |
+
+## Layer-2 Output Files
+
+| Output | File |
+|---|---|
+| Aligned 1M DNA | `data/aligned_1m_candle_dna.jsonl` |
+| Aligned 5M DNA | `data/aligned_5m_candle_dna.jsonl` |
+| Aligned 15M DNA | `data/aligned_15m_candle_dna.jsonl` |
+| Aligned 1H DNA | `data/aligned_1h_candle_dna.jsonl` |
+| Aligned 4H DNA | `data/aligned_4h_candle_dna.jsonl` |
+| Aligned 1D DNA | `data/aligned_1d_candle_dna.jsonl` |
 
 ## Layer-1 Output Files
 
@@ -43,6 +55,10 @@ python3 rolling_window_engine.py
 
 # Optional: full JSON output instead of summary lines
 FULL_PRINT=true python3 rolling_window_engine.py
+
+# Terminal 3 — Layer-2 (UTC-aligned candles: 1M, 5M, 15M, 1H, 4H, 1D)
+python3 aligned_candle_engine.py
+FULL_PRINT=true python3 aligned_candle_engine.py
 ```
 
 **Windows**
@@ -57,6 +73,9 @@ python main.py
 
 # Terminal 2
 python rolling_window_engine.py
+
+# Terminal 3
+python aligned_candle_engine.py
 ```
 
 ## Deployment
@@ -87,3 +106,11 @@ hardcoded remote is included in the codebase.
 - Single `deque(maxlen=15)` buffer; 3S / 5S / 15S windows are sliced from it without re-reading
 - 11-point validation before each write; failures logged to terminal, engine continues
 - No external dependencies (stdlib only: json, os, time, collections)
+
+**Layer-2**
+- Reads `data/combined_1s_dna_btcusdt.jsonl` from the beginning, then follows live (tail -f)
+- Hierarchical state machine: 1S -> 1M -> 5M -> 15M -> 1H -> 4H -> 1D (each level feeds the next)
+- UTC-aligned, non-overlapping candles; partial periods at startup are discarded silently
+- Includes Volume Profile (POC, VAH/VAL 70%, HVN, LVN) for each candle
+- 11-point validation before each write; failures logged to terminal, engine continues
+- No external dependencies (stdlib only: json, os, time)
