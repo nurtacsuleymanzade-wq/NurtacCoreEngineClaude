@@ -112,22 +112,32 @@ def build_candle_dna(
     has_trade = bool(trades)
 
     if has_trade:
-        open_t = trades[0]
-
-        # Scan all trades including open for high/low; first occurrence wins on tie
-        high_price = open_t["price"]
-        low_price  = open_t["price"]
-        high_t     = open_t
-        low_t      = open_t
-        buy_vol    = 0.0
-        sell_vol   = 0.0
+        # Initialize all OHLC fields as None — never 0.0.
+        # The first valid trade (price > 0, guaranteed by stream-level filter)
+        # atomically sets open/high/low/close. Subsequent trades update close
+        # and conditionally update high/low. No intermediate 0.0 state exists.
+        open_v  = None
+        high_v  = None
+        low_v   = None
+        close_v = None
+        buy_vol  = 0.0
+        sell_vol = 0.0
 
         for t in trades:
-            p = t["price"]
-            if p > high_price:
-                high_price, high_t = p, t
-            if p < low_price:
-                low_price, low_t   = p, t
+            p  = t["price"]
+            ev = {"price": p, "time": t["time_ms"], "side": t["side"].value}
+
+            if open_v is None:
+                # First trade: open, high, low all start from this same event
+                open_v = high_v = low_v = ev
+            else:
+                if p > high_v["price"]:
+                    high_v = ev
+                if p < low_v["price"]:
+                    low_v  = ev
+
+            close_v = ev  # every trade updates close
+
             if t["side"] is TradeSide.BUY:
                 buy_vol  += t["qty"]
             else:
@@ -135,23 +145,30 @@ def build_candle_dna(
 
         total_vol = buy_vol + sell_vol
         d         = buy_vol - sell_vol
-        close_t   = trades[-1]
+
+        # Validation: prices must be > 0 (should always pass after stream-level filter)
+        if (open_v is None or open_v["price"] <= 0
+                or high_v["price"] <= 0
+                or low_v["price"]  <= 0
+                or close_v["price"] <= 0):
+            print(f"[WARN] Candle validation failed: non-positive price in OHLC "
+                  f"at window_start_ts={window_start_ts}")
 
         return {
             "symbol":              SYMBOL,
             "window_start_ts":     window_start_ts,
             "window_end_ts":       window_end_ts,
-            "open":  {"price": open_t["price"],  "time": open_t["time_ms"],  "side": open_t["side"].value},
-            "high":  {"price": high_t["price"],  "time": high_t["time_ms"],  "side": high_t["side"].value},
-            "low":   {"price": low_t["price"],   "time": low_t["time_ms"],   "side": low_t["side"].value},
-            "close": {"price": close_t["price"], "time": close_t["time_ms"], "side": close_t["side"].value},
+            "open":                open_v,
+            "high":                high_v,
+            "low":                 low_v,
+            "close":               close_v,
             "trade_count":         len(trades),
             "buy_volume":          buy_vol,
             "sell_volume":         sell_vol,
             "total_volume":        total_vol,
             "delta":               d,
             "delta_state":         _delta_state(d),
-            "last_trade_price":    close_t["price"],
+            "last_trade_price":    close_v["price"],
             "has_trade":           True,
             "carry_forward":       False,
             "carry_forward_price": None,
@@ -336,6 +353,9 @@ async def _run_trade_stream() -> None:
                 print("[Trade] Connected.")
                 async for raw in ws:
                     ev = _parse_trade_event(json.loads(raw))
+                    if ev["price"] <= 0:
+                        # Skip anomalous zero/negative price events (Binance data guard)
+                        continue
                     async with _lock:
                         _state.trade_buffer.append(ev)
                         if not _state.first_trade_seen:
