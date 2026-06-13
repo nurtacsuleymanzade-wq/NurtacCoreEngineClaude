@@ -480,17 +480,28 @@ def _append_jsonl(path: str, obj: dict) -> None:
 
 
 def _print_summary(obj: dict) -> None:
-    tf    = obj["timeframe"]
-    close = obj["ohlc"]["close"]
-    cp    = close["price"] if close is not None else "null"
-    prof  = obj["profile"]
-    dc    = obj["data_completeness"]
+    tf   = obj["timeframe"]
+    ohlc = obj["ohlc"]
+    vol  = obj["volume"]
+    tf_  = obj["trade_flow"]
+    prof = obj["profile"]
+    df   = obj["depth_flow"]
+
+    def _p(v):
+        return v["price"] if v is not None else "null"
+
     print(
         f"[ALIGNED {tf}] ts={obj['window_start_ts']}-{obj['window_end_ts']} "
-        f"close={cp} trades={obj['trade_flow']['trade_count']} "
-        f"delta={obj['volume']['delta']} "
+        f"O={_p(ohlc['open'])} H={_p(ohlc['high'])} "
+        f"L={_p(ohlc['low'])} C={_p(ohlc['close'])} "
+        f"trades={tf_['trade_count']} "
+        f"buy={vol['buy_volume']:.4f} sell={vol['sell_volume']:.4f} "
+        f"delta={vol['delta']:.4f} "
         f"poc={prof['poc']} vah={prof['vah']} val={prof['val']} "
-        f"completeness={dc:.2f}"
+        f"hvn={len(prof['hvn'])} lvn={len(prof['lvn'])} "
+        f"depth_dom={df['dominant_side']} "
+        f"completeness={obj['data_completeness']:.2f} "
+        f"missing={len(obj['missing_units'])}"
     )
 
 
