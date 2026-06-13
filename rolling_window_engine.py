@@ -19,11 +19,12 @@ from collections import deque
 from typing import Optional
 
 # ── Config ───────────────────────────────────────────────────────────────────
-SYMBOL     = "BTCUSDT"
-INPUT_FILE = os.path.join("data", "combined_1s_dna_btcusdt.jsonl")
-OUTPUT_3S  = os.path.join("data", "rolling_3s_dna.jsonl")
-OUTPUT_5S  = os.path.join("data", "rolling_5s_dna.jsonl")
-OUTPUT_15S = os.path.join("data", "rolling_15s_dna.jsonl")
+SYMBOL      = "BTCUSDT"
+INPUT_FILE  = os.path.join("data", "combined_1s_dna_btcusdt.jsonl")
+OUTPUT_3S   = os.path.join("data", "rolling_3s_dna.jsonl")
+OUTPUT_5S   = os.path.join("data", "rolling_5s_dna.jsonl")
+OUTPUT_15S  = os.path.join("data", "rolling_15s_dna.jsonl")
+DQ_LOG_FILE = os.path.join("data", "data_quality_log.jsonl")
 
 WINDOW_SIZES   = [3, 5, 15]
 OUTPUT_FILES   = {3: OUTPUT_3S, 5: OUTPUT_5S, 15: OUTPUT_15S}
@@ -31,6 +32,24 @@ OUTPUT_FILES   = {3: OUTPUT_3S, 5: OUTPUT_5S, 15: OUTPUT_15S}
 FULL_PRINT         = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL      = 0.05   # seconds between readline retries when no new data
 FILE_WAIT_INTERVAL = 0.5    # seconds between checks when input file doesn't exist yet
+
+
+# ── Data quality log ──────────────────────────────────────────────────────────
+def _log_quality(event_type: str, detail: dict) -> None:
+    entry = {
+        "ts":         int(time.time() * 1000),
+        "source":     "layer1",
+        "event_type": event_type,
+        "detail":     detail,
+    }
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open(DQ_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -341,6 +360,7 @@ def follow_jsonl(path: str):
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     os.makedirs("data", exist_ok=True)
+    _log_quality("engine_started", {"script": "rolling_window_engine.py"})
 
     print("NurtacCoreEngineClaude — Layer-1 Rolling Window Engine")
     print(f"Input : {INPUT_FILE}")
@@ -350,8 +370,25 @@ def main() -> None:
 
     # Single shared buffer; maxlen=15 covers all three window sizes
     buf: deque[dict] = deque(maxlen=15)
+    last_ts: Optional[int] = None
 
     for record in follow_jsonl(INPUT_FILE):
+        ts = record["window_start_ts"]
+
+        # Gap detection: source timestamps must be consecutive 1-second steps
+        if last_ts is not None and ts != last_ts + 1000:
+            gap_s = (ts - last_ts) // 1000 - 1
+            print(
+                f"[GAP] Source gap detected: prev_ts={last_ts} curr_ts={ts} "
+                f"missing={gap_s}s"
+            )
+            _log_quality("gap_detected", {
+                "prev_ts":       last_ts,
+                "curr_ts":       ts,
+                "gap_seconds":   gap_s,
+            })
+        last_ts = ts
+
         buf.append(record)
         n = len(buf)
 
@@ -370,6 +407,11 @@ def main() -> None:
                 )
                 for err in errors:
                     print(f"  {err}")
+                _log_quality("gap_detected", {
+                    "window_type":     obj["window_type"],
+                    "window_start_ts": obj["window_start_ts"],
+                    "errors":          errors,
+                })
                 continue
 
             _append_jsonl(OUTPUT_FILES[window_size], obj)

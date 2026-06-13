@@ -1,0 +1,14 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-1 (Rolling Window Engine)
+After=network-online.target nurtac-layer0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 rolling_window_engine.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

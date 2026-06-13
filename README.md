@@ -38,6 +38,14 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Rolling 5S DNA | `data/rolling_5s_dna.jsonl` |
 | Rolling 15S DNA | `data/rolling_15s_dna.jsonl` |
 
+## Data Quality Log
+
+All three engines write anomaly and status events to:
+
+| File | Description |
+|---|---|
+| `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
 ## Setup & Run
 
 **Linux / macOS**
@@ -59,6 +67,14 @@ FULL_PRINT=true python3 rolling_window_engine.py
 # Terminal 3 — Layer-2 (UTC-aligned candles: 1M, 5M, 15M, 1H, 4H, 1D)
 python3 aligned_candle_engine.py
 FULL_PRINT=true python3 aligned_candle_engine.py
+
+# Terminal 4 — Watchdog (data freshness + disk + stream health)
+python3 watchdog.py
+
+# Optional Telegram alerts:
+# export TELEGRAM_BOT_TOKEN=<your bot token>
+# export TELEGRAM_CHAT_ID=<your chat id>
+# python3 watchdog.py
 ```
 
 **Windows**
@@ -76,6 +92,23 @@ python rolling_window_engine.py
 
 # Terminal 3
 python aligned_candle_engine.py
+
+# Terminal 4
+python watchdog.py
+```
+
+## Log Rotation
+
+Rotate all `data/*.jsonl` files to `data/archive/YYYY-MM-DD/` and compress
+archives older than 30 days:
+
+```bash
+python3 rotate_logs.py
+```
+
+Crontab example (UTC midnight daily):
+```
+0 0 * * * cd /root/NurtacCoreEngineClaude && python3 rotate_logs.py
 ```
 
 ## Deployment
@@ -84,6 +117,25 @@ This repository is named **NurtacCoreEngineClaude** on GitHub.
 Every update is pushed to the same repository and the same VPS.
 The remote URL and push command are configured by the user — no
 hardcoded remote is included in the codebase.
+
+### systemd Services (VPS)
+
+Service files are in `deploy/`. Copy them to `/etc/systemd/system/` and enable:
+
+```bash
+sudo cp deploy/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nurtac-layer0 nurtac-layer1 nurtac-layer2 nurtac-watchdog
+```
+
+To configure Telegram alerts in the watchdog service, edit
+`/etc/systemd/system/nurtac-watchdog.service` and uncomment the
+`Environment=` lines with your bot token and chat ID, then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart nurtac-watchdog
+```
 
 ## Requirements
 
@@ -95,22 +147,34 @@ hardcoded remote is included in the codebase.
 
 **Layer-0**
 - Two independent WebSocket connections (trade stream + depth stream)
-- 1-second windows aligned to wall-clock boundaries with drift compensation
+- Event-time bucketing: each event is bucketed by its own timestamp (T for trades, E for depth), not by wall-clock arrival time
+- Grace period of 300 ms after window_end_ts before finalizing each bucket
+- Late events (arriving after grace period) are logged and dropped; the already-written JSONL row is never modified
+- One-time Binance schema sanity check on first trade and depth message; fatal exit if required fields are missing
 - Exponential backoff reconnect: 1 s → 2 s → 4 s → 8 s → 16 s → 30 s (per stream)
 - Warm-up: output suppressed until at least one trade AND one depth event received
 - All shared state protected by `asyncio.Lock`
 - Each JSONL write is followed by `flush()` + `fsync()`
+- Disconnects, reconnects, late events, and anomalies written to `data/data_quality_log.jsonl`
 
 **Layer-1**
 - Reads `data/combined_1s_dna_btcusdt.jsonl` from the beginning, then follows live (tail -f)
 - Single `deque(maxlen=15)` buffer; 3S / 5S / 15S windows are sliced from it without re-reading
-- 11-point validation before each write; failures logged to terminal, engine continues
+- Gap detection: non-consecutive source timestamps logged to `data/data_quality_log.jsonl`
+- 11-point validation before each write; failures logged to terminal and quality log
 - No external dependencies (stdlib only: json, os, time, collections)
 
 **Layer-2**
 - Reads `data/combined_1s_dna_btcusdt.jsonl` from the beginning, then follows live (tail -f)
 - Hierarchical state machine: 1S -> 1M -> 5M -> 15M -> 1H -> 4H -> 1D (each level feeds the next)
-- UTC-aligned, non-overlapping candles; partial periods at startup are discarded silently
+- UTC-aligned, non-overlapping candles; ALL periods are always emitted (no minimum count threshold)
+- Each candle includes `expected_count`, `source_count`, `missing_units`, `data_completeness` fields
 - Includes Volume Profile (POC, VAH/VAL 70%, HVN, LVN) for each candle
-- 11-point validation before each write; failures logged to terminal, engine continues
+- 11-point validation before each write; failures logged to terminal and quality log
 - No external dependencies (stdlib only: json, os, time)
+
+**Watchdog**
+- Polls every 30 seconds
+- Checks data freshness (alerts if last record is >15 s old), disk usage (alerts if >85%), and stream health (alerts on unrecovered disconnects)
+- Optional Telegram alerts via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars; 5-minute per-type cooldown to prevent spam
+- `requests` library required only for Telegram; watchdog works without it (terminal-only alerts)

@@ -20,7 +20,12 @@ Float is acceptable for this MVP layer.
 import asyncio
 import json
 import os
+import sys
 import time
+
+# Ensure UTF-8 terminal output on Windows (cp1252 can't encode Turkish chars)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -37,12 +42,17 @@ CANDLE_FILE    = os.path.join(DATA_DIR, "candle_dna_btcusdt.jsonl")
 FOOTPRINT_FILE = os.path.join(DATA_DIR, "footprint_dna_btcusdt.jsonl")
 DEPTH_FILE     = os.path.join(DATA_DIR, "depth_dna_btcusdt.jsonl")
 COMBINED_FILE  = os.path.join(DATA_DIR, "combined_1s_dna_btcusdt.jsonl")
+DQ_LOG_FILE    = os.path.join(DATA_DIR, "data_quality_log.jsonl")
 
 # Exponential backoff in seconds; last value is used for all subsequent retries
 BACKOFF_DELAYS = [1, 2, 4, 8, 16, 30]
 
 # Grace period: ms after window_end_ts before finalizing (absorbs network jitter)
 GRACE_PERIOD_MS = 300
+
+# Required fields in Binance WebSocket messages (checked once on first message)
+_TRADE_REQUIRED_FIELDS = ("p", "q", "T", "m")
+_DEPTH_REQUIRED_FIELDS = ("b", "a", "E")
 
 
 # ── Side enums ───────────────────────────────────────────────────────────────
@@ -78,6 +88,32 @@ class SharedState:
 
 _state = SharedState()
 _lock  = asyncio.Lock()
+
+# One-time schema check flags (set to True after first valid message)
+_trade_schema_checked = False
+_depth_schema_checked = False
+
+# Reconnect detection (True after first successful connection)
+_trade_ever_connected = False
+_depth_ever_connected = False
+
+
+# ── Data quality log ──────────────────────────────────────────────────────────
+def _log_quality(event_type: str, detail: dict) -> None:
+    entry = {
+        "ts":         int(time.time() * 1000),
+        "source":     "layer0",
+        "event_type": event_type,
+        "detail":     detail,
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(DQ_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
 
 
 # ── Pure computation helpers ──────────────────────────────────────────────────
@@ -349,19 +385,54 @@ def _print_dna(label: str, obj: dict) -> None:
 
 # ── WebSocket streams with exponential backoff ────────────────────────────────
 async def _run_trade_stream() -> None:
+    global _trade_schema_checked, _trade_ever_connected
     backoff_idx = 0
     while True:
         try:
             async with websockets.connect(TRADE_WS_URL) as ws:
                 async with _lock:
                     _state.trade_connected = True
+                if _trade_ever_connected:
+                    print("[Trade] Reconnected.")
+                    _log_quality("stream_reconnected", {"stream": "trade"})
+                else:
+                    print("[Trade] Connected.")
+                _trade_ever_connected = True
                 backoff_idx = 0
-                print("[Trade] Connected.")
+
                 async for raw in ws:
-                    ev = _parse_trade_event(json.loads(raw))
+                    msg = json.loads(raw)
+
+                    # One-time Binance schema sanity check on the very first message
+                    if not _trade_schema_checked:
+                        missing = [f for f in _TRADE_REQUIRED_FIELDS if f not in msg]
+                        if missing:
+                            print(
+                                f"KRİTİK: Binance mesaj formatı beklenenden farklı, "
+                                f"alan eksik: {missing}, ham mesaj: {raw[:500]}"
+                            )
+                            _log_quality("schema_error", {
+                                "stream": "trade",
+                                "missing_fields": missing,
+                            })
+                            await asyncio.sleep(5)
+                            sys.exit(1)
+                        _trade_schema_checked = True
+
+                    ev = _parse_trade_event(msg)
+
                     if ev["price"] <= 0:
-                        # Skip anomalous zero/negative price events (Binance data guard)
+                        print(
+                            f"[ANOMALI] price<=0 trade atlandı: "
+                            f"price={ev['price']} time={ev['time_ms']}"
+                        )
+                        _log_quality("anomaly_skipped", {
+                            "stream": "trade",
+                            "price":   ev["price"],
+                            "time_ms": ev["time_ms"],
+                        })
                         continue
+
                     # Bucket by event's own timestamp T, not by arrival time
                     wts = (ev["time_ms"] // 1000) * 1000
                     async with _lock:
@@ -371,6 +442,11 @@ async def _run_trade_stream() -> None:
                                 f"event_time={ev['time_ms']}, "
                                 f"window_start_ts={wts} already finalized"
                             )
+                            _log_quality("late_event_dropped", {
+                                "stream":          "trade",
+                                "event_time":      ev["time_ms"],
+                                "window_start_ts": wts,
+                            })
                         else:
                             bucket = _state.buckets.setdefault(
                                 wts, {"trades": [], "depths": []}
@@ -379,28 +455,59 @@ async def _run_trade_stream() -> None:
                             if not _state.first_trade_seen:
                                 _state.first_trade_seen = True
                                 print("[Trade] First event received.")
+
         except Exception as exc:
             async with _lock:
                 _state.trade_connected = False
             delay = BACKOFF_DELAYS[min(backoff_idx, len(BACKOFF_DELAYS) - 1)]
             print(f"[Trade] Disconnected ({exc}). Retrying in {delay}s...")
+            _log_quality("stream_disconnected", {
+                "stream": "trade",
+                "error":  str(exc),
+                "retry_in_s": delay,
+            })
             await asyncio.sleep(delay)
             backoff_idx = min(backoff_idx + 1, len(BACKOFF_DELAYS) - 1)
 
 
 async def _run_depth_stream() -> None:
+    global _depth_schema_checked, _depth_ever_connected
     backoff_idx = 0
     while True:
         try:
             async with websockets.connect(DEPTH_WS_URL) as ws:
                 async with _lock:
                     _state.depth_connected = True
+                if _depth_ever_connected:
+                    print("[Depth] Reconnected.")
+                    _log_quality("stream_reconnected", {"stream": "depth"})
+                else:
+                    print("[Depth] Connected.")
+                _depth_ever_connected = True
                 backoff_idx = 0
-                print("[Depth] Connected.")
+
                 async for raw in ws:
-                    msg     = json.loads(raw)
+                    msg = json.loads(raw)
+
+                    # One-time Binance schema sanity check on the very first message
+                    if not _depth_schema_checked:
+                        missing = [f for f in _DEPTH_REQUIRED_FIELDS if f not in msg]
+                        if missing:
+                            print(
+                                f"KRİTİK: Binance mesaj formatı beklenenden farklı, "
+                                f"alan eksik: {missing}, ham mesaj: {raw[:500]}"
+                            )
+                            _log_quality("schema_error", {
+                                "stream": "depth",
+                                "missing_fields": missing,
+                            })
+                            await asyncio.sleep(5)
+                            sys.exit(1)
+                        _depth_schema_checked = True
+
                     time_ms = int(msg["E"])
                     ev      = {"time_ms": time_ms, "bids": msg["b"], "asks": msg["a"]}
+
                     # Bucket by event's own timestamp E, not by arrival time
                     wts = (time_ms // 1000) * 1000
                     async with _lock:
@@ -410,6 +517,11 @@ async def _run_depth_stream() -> None:
                                 f"event_time={time_ms}, "
                                 f"window_start_ts={wts} already finalized"
                             )
+                            _log_quality("late_event_dropped", {
+                                "stream":          "depth",
+                                "event_time":      time_ms,
+                                "window_start_ts": wts,
+                            })
                         else:
                             bucket = _state.buckets.setdefault(
                                 wts, {"trades": [], "depths": []}
@@ -418,11 +530,17 @@ async def _run_depth_stream() -> None:
                             if not _state.first_depth_seen:
                                 _state.first_depth_seen = True
                                 print("[Depth] First event received.")
+
         except Exception as exc:
             async with _lock:
                 _state.depth_connected = False
             delay = BACKOFF_DELAYS[min(backoff_idx, len(BACKOFF_DELAYS) - 1)]
             print(f"[Depth] Disconnected ({exc}). Retrying in {delay}s...")
+            _log_quality("stream_disconnected", {
+                "stream": "depth",
+                "error":  str(exc),
+                "retry_in_s": delay,
+            })
             await asyncio.sleep(delay)
             backoff_idx = min(backoff_idx + 1, len(BACKOFF_DELAYS) - 1)
 
@@ -437,6 +555,7 @@ async def _scheduler() -> None:
     records so the JSONL stream remains gapless.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
+    _log_quality("engine_started", {"script": "main.py"})
 
     # Block until at least one trade AND one depth event have been received
     print("Warm-up: waiting for first trade and depth event...")

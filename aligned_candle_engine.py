@@ -21,6 +21,7 @@ from typing import Optional
 # ── Config ────────────────────────────────────────────────────────────────────
 SYMBOL     = "BTCUSDT"
 INPUT_FILE = os.path.join("data", "combined_1s_dna_btcusdt.jsonl")
+DQ_LOG_FILE = os.path.join("data", "data_quality_log.jsonl")
 
 OUTPUT_FILES = {
     "1M":  os.path.join("data", "aligned_1m_candle_dna.jsonl"),
@@ -65,6 +66,23 @@ _NEXT_TF = {"1M": "5M", "5M": "15M", "15M": "1H", "1H": "4H", "4H": "1D"}
 FULL_PRINT         = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL      = 0.05
 FILE_WAIT_INTERVAL = 0.5
+
+
+# ── Data quality log ──────────────────────────────────────────────────────────
+def _log_quality(event_type: str, detail: dict) -> None:
+    entry = {
+        "ts":         int(time.time() * 1000),
+        "source":     "layer2",
+        "event_type": event_type,
+        "detail":     detail,
+    }
+    try:
+        with open(DQ_LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -201,9 +219,29 @@ def _compute_profile(price_levels: list, close_price: Optional[float]) -> dict:
     }
 
 
+# ── Missing-unit helpers ──────────────────────────────────────────────────────
+def _missing_units(bucket: int, timeframe: str, got_ts: set) -> list:
+    """Return sorted list of expected source window_start_ts values not in got_ts."""
+    exp    = EXPECTED_COUNT[timeframe]
+    step   = TIMEFRAME_MS[timeframe] // exp
+    return sorted(
+        bucket + i * step
+        for i in range(exp)
+        if (bucket + i * step) not in got_ts
+    )
+
+
 # ── Candle builders ───────────────────────────────────────────────────────────
 def _build_1m_candle(records: list, bucket: int) -> dict:
-    """Build aligned 1M candle from exactly 60 1S combined DNA records."""
+    """Build aligned 1M candle from accumulated 1S combined DNA records.
+
+    Always emits regardless of how many records were received.
+    """
+    sc      = len(records)
+    exp     = EXPECTED_COUNT["1M"]
+    got_ts  = {r["window_start_ts"] for r in records}
+    missing = _missing_units(bucket, "1M", got_ts)
+
     # OHLC — source: candle_dna; "has_trade unit" = has_trade == True
     open_v = close_v = high_v = low_v = None
     for r in records:
@@ -232,19 +270,22 @@ def _build_1m_candle(records: list, bucket: int) -> dict:
     # Footprint — source: footprint_dna
     pl = _aggregate_fp(records, "footprint_dna")
 
-    # Depth — source: depth_dna (has_depth=false -> counts are 0, already stored as 0)
+    # Depth — source: depth_dna (has_depth=false -> counts are 0)
     bid = sum(r["depth_dna"]["bid_update_count"] for r in records)
     ask = sum(r["depth_dna"]["ask_update_count"] for r in records)
 
     cp = close_v["price"] if close_v is not None else None
 
     return {
-        "symbol":           SYMBOL,
-        "timeframe":        "1M",
-        "window_start_ts":  bucket,
-        "window_end_ts":    bucket + TIMEFRAME_MS["1M"],
-        "source_count":     60,
-        "source_timeframe": "1S",
+        "symbol":             SYMBOL,
+        "timeframe":          "1M",
+        "window_start_ts":    bucket,
+        "window_end_ts":      bucket + TIMEFRAME_MS["1M"],
+        "source_timeframe":   "1S",
+        "expected_count":     exp,
+        "source_count":       sc,
+        "missing_units":      missing,
+        "data_completeness":  sc / exp,
         "ohlc": {"open": open_v, "high": high_v, "low": low_v, "close": close_v},
         "volume": {
             "buy_volume":   bv,
@@ -256,10 +297,10 @@ def _build_1m_candle(records: list, bucket: int) -> dict:
         "trade_flow": {
             "trade_count":               tc,
             "active_units":              act,
-            "empty_units":               60 - act,
-            "avg_trade_count_per_unit":  tc / 60,
-            "max_trade_count_unit":      max(tcs),
-            "min_trade_count_unit":      min(tcs),
+            "empty_units":               sc - act,
+            "avg_trade_count_per_unit":  tc / sc if sc else 0.0,
+            "max_trade_count_unit":      max(tcs) if tcs else 0,
+            "min_trade_count_unit":      min(tcs) if tcs else 0,
         },
         "footprint": {"price_levels": pl},
         "profile":   _compute_profile(pl, cp),
@@ -272,9 +313,15 @@ def _build_1m_candle(records: list, bucket: int) -> dict:
 
 
 def _build_higher_candle(units: list, timeframe: str, bucket: int) -> dict:
-    """Build aligned 5M/15M/1H/4H/1D candle from lower aligned candles."""
-    src_tf   = SOURCE_TF[timeframe]
-    expected = EXPECTED_COUNT[timeframe]
+    """Build aligned 5M/15M/1H/4H/1D candle from lower aligned candles.
+
+    Always emits regardless of how many units were received.
+    """
+    src_tf  = SOURCE_TF[timeframe]
+    exp     = EXPECTED_COUNT[timeframe]
+    sc      = len(units)
+    got_ts  = {u["window_start_ts"] for u in units}
+    missing = _missing_units(bucket, timeframe, got_ts)
 
     # "has_trade unit" for 5M+ = ohlc.close != null
     # OHLC — source: unit.ohlc; first/last active wins
@@ -313,12 +360,15 @@ def _build_higher_candle(units: list, timeframe: str, bucket: int) -> dict:
     cp = close_v["price"] if close_v is not None else None
 
     return {
-        "symbol":           SYMBOL,
-        "timeframe":        timeframe,
-        "window_start_ts":  bucket,
-        "window_end_ts":    bucket + TIMEFRAME_MS[timeframe],
-        "source_count":     expected,
-        "source_timeframe": src_tf,
+        "symbol":             SYMBOL,
+        "timeframe":          timeframe,
+        "window_start_ts":    bucket,
+        "window_end_ts":      bucket + TIMEFRAME_MS[timeframe],
+        "source_timeframe":   src_tf,
+        "expected_count":     exp,
+        "source_count":       sc,
+        "missing_units":      missing,
+        "data_completeness":  sc / exp,
         "ohlc": {"open": open_v, "high": high_v, "low": low_v, "close": close_v},
         "volume": {
             "buy_volume":   bv,
@@ -330,10 +380,10 @@ def _build_higher_candle(units: list, timeframe: str, bucket: int) -> dict:
         "trade_flow": {
             "trade_count":               tc,
             "active_units":              act,
-            "empty_units":               expected - act,
-            "avg_trade_count_per_unit":  tc / expected,
-            "max_trade_count_unit":      max(tcs),
-            "min_trade_count_unit":      min(tcs),
+            "empty_units":               sc - act,
+            "avg_trade_count_per_unit":  tc / sc if sc else 0.0,
+            "max_trade_count_unit":      max(tcs) if tcs else 0,
+            "min_trade_count_unit":      min(tcs) if tcs else 0,
         },
         "footprint": {"price_levels": pl},
         "profile":   _compute_profile(pl, cp),
@@ -350,52 +400,73 @@ def _validate(obj: dict) -> list[str]:
     errors   = []
     tf       = obj["timeframe"]
     wts      = obj["window_start_ts"]
-    expected = EXPECTED_COUNT[tf]
+    exp      = obj["expected_count"]
+    sc       = obj["source_count"]
     vol      = obj["volume"]
     tflow    = obj["trade_flow"]
     prof     = obj["profile"]
     ohlc     = obj["ohlc"]
 
-    if obj["source_count"] != expected:
-        errors.append(f"[1] source_count={obj['source_count']} != {expected} at ts={wts}")
+    # [1] source_count + len(missing_units) == expected_count
+    if sc + len(obj["missing_units"]) != exp:
+        errors.append(
+            f"[1] source_count({sc}) + missing({len(obj['missing_units'])}) "
+            f"!= expected_count({exp}) at ts={wts}"
+        )
 
+    # [2] len(source_window_start_ts) == source_count
     sw = obj["source_refs"]["source_window_start_ts"]
-    if len(sw) != expected:
-        errors.append(f"[2] len(source_window_start_ts)={len(sw)} != {expected} at ts={wts}")
+    if len(sw) != sc:
+        errors.append(
+            f"[2] len(source_window_start_ts)={len(sw)} != source_count={sc} at ts={wts}"
+        )
 
+    # [3] total_volume == buy + sell
     if abs(vol["buy_volume"] + vol["sell_volume"] - vol["total_volume"]) > 1e-9:
         errors.append(f"[3] total_volume mismatch at ts={wts}")
 
+    # [4] delta == buy - sell
     if abs(vol["buy_volume"] - vol["sell_volume"] - vol["delta"]) > 1e-9:
         errors.append(f"[4] delta mismatch at ts={wts}")
 
+    # [5] footprint buy sum == volume.buy
     fp_buy = sum(lv["buy_volume"] for lv in obj["footprint"]["price_levels"])
     if abs(fp_buy - vol["buy_volume"]) >= 1e-9:
         errors.append(f"[5] footprint buy_volume sum mismatch at ts={wts}")
 
+    # [6] footprint sell sum == volume.sell
     fp_sell = sum(lv["sell_volume"] for lv in obj["footprint"]["price_levels"])
     if abs(fp_sell - vol["sell_volume"]) >= 1e-9:
         errors.append(f"[6] footprint sell_volume sum mismatch at ts={wts}")
 
-    if tflow["active_units"] + tflow["empty_units"] != expected:
-        errors.append(f"[7] active_units+empty_units != source_count at ts={wts}")
+    # [7] active_units + empty_units == source_count (not expected_count)
+    if tflow["active_units"] + tflow["empty_units"] != sc:
+        errors.append(
+            f"[7] active_units({tflow['active_units']})+empty_units({tflow['empty_units']}) "
+            f"!= source_count({sc}) at ts={wts}"
+        )
 
+    # [8] high >= low
     if ohlc["high"] is not None and ohlc["low"] is not None:
         if ohlc["high"]["price"] < ohlc["low"]["price"]:
             errors.append(f"[8] high.price < low.price at ts={wts}")
 
+    # [9] poc in price_levels
     if prof["poc"] is not None:
         prices = {lv["price"] for lv in obj["footprint"]["price_levels"]}
         if prof["poc"] not in prices:
             errors.append(f"[9] poc={prof['poc']} not in price_levels at ts={wts}")
 
+    # [10] vah >= val
     if prof["vah"] is not None and prof["val"] is not None:
         if prof["vah"] < prof["val"]:
             errors.append(f"[10] vah={prof['vah']} < val={prof['val']} at ts={wts}")
 
-    expected_end = wts + TIMEFRAME_MS[tf]
-    if obj["window_end_ts"] != expected_end:
-        errors.append(f"[11] window_end_ts={obj['window_end_ts']} != {expected_end} at ts={wts}")
+    # [11] window_end_ts matches timeframe
+    if obj["window_end_ts"] != wts + TIMEFRAME_MS[tf]:
+        errors.append(
+            f"[11] window_end_ts={obj['window_end_ts']} != {wts + TIMEFRAME_MS[tf]} at ts={wts}"
+        )
 
     return errors
 
@@ -413,11 +484,13 @@ def _print_summary(obj: dict) -> None:
     close = obj["ohlc"]["close"]
     cp    = close["price"] if close is not None else "null"
     prof  = obj["profile"]
+    dc    = obj["data_completeness"]
     print(
         f"[ALIGNED {tf}] ts={obj['window_start_ts']}-{obj['window_end_ts']} "
         f"close={cp} trades={obj['trade_flow']['trade_count']} "
         f"delta={obj['volume']['delta']} "
-        f"poc={prof['poc']} vah={prof['vah']} val={prof['val']}"
+        f"poc={prof['poc']} vah={prof['vah']} val={prof['val']} "
+        f"completeness={dc:.2f}"
     )
 
 
@@ -446,9 +519,12 @@ def _follow_jsonl(path: str):
 class AlignedCandleEngine:
     """
     State per timeframe: {bucket, buffer}
-    - 1M: fills from 1S records; closes when new minute arrives with full 60-record buffer
-    - 5M+: fills from lower aligned candles; closes immediately when count is reached
-    Partial periods (startup) are discarded silently.
+
+    1M: fills from 1S records; emits when a new minute boundary arrives,
+        regardless of how many 1S records were collected.
+    5M+: fills from lower aligned candles; emits when the next period
+        boundary arrives OR immediately when count reaches expected.
+    All partial periods (including startup) are now always emitted.
     """
 
     def __init__(self) -> None:
@@ -468,10 +544,9 @@ class AlignedCandleEngine:
             state["buffer"].append(record)
             return
 
-        # Minute boundary crossed — check if previous buffer is complete
-        if len(state["buffer"]) == EXPECTED_COUNT["1M"]:
+        # Minute boundary crossed — always emit whatever we have
+        if state["buffer"]:
             self._emit("1M", state["buffer"], state["bucket"])
-        # else: partial minute at startup → discard silently
 
         state["bucket"] = bucket
         state["buffer"] = [record]
@@ -482,13 +557,18 @@ class AlignedCandleEngine:
         bucket = (ts // BUCKET_DIV[timeframe]) * BUCKET_DIV[timeframe]
         state  = self._s[timeframe]
 
-        if state["bucket"] is None or bucket != state["bucket"]:
-            # New period — discard any partial buffer from previous period
-            state["bucket"] = bucket
+        if state["bucket"] is not None and bucket != state["bucket"]:
+            # Period boundary crossed — emit whatever we have for the previous period
+            if state["buffer"]:
+                self._emit(timeframe, state["buffer"], state["bucket"])
             state["buffer"] = []
+
+        if state["bucket"] is None or bucket != state["bucket"]:
+            state["bucket"] = bucket
 
         state["buffer"].append(unit)
 
+        # Also emit immediately when all expected units are received
         if len(state["buffer"]) == EXPECTED_COUNT[timeframe]:
             self._emit(timeframe, state["buffer"], bucket)
             state["buffer"] = []
@@ -504,6 +584,11 @@ class AlignedCandleEngine:
             print(f"[VALIDATION FAIL] {timeframe} window_start_ts={bucket}")
             for e in errors:
                 print(f"  {e}")
+            _log_quality("candle_skipped_continuity", {
+                "timeframe": timeframe,
+                "window_start_ts": bucket,
+                "errors": errors,
+            })
             return
 
         _append_jsonl(OUTPUT_FILES[timeframe], obj)
@@ -521,6 +606,8 @@ class AlignedCandleEngine:
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     os.makedirs("data", exist_ok=True)
+    _log_quality("engine_started", {"script": "aligned_candle_engine.py"})
+
     print("NurtacCoreEngineClaude — Layer-2 Aligned Candle Engine")
     print(f"Input : {INPUT_FILE}")
     print(f"FULL_PRINT={'true' if FULL_PRINT else 'false'}")
