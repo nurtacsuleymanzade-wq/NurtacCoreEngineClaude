@@ -9,6 +9,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-0 | `main.py` | Live WebSocket → 1S DNA (Candle, Footprint, Depth, Combined) |
 | Layer-1 | `rolling_window_engine.py` | Combined 1S → Rolling 3S / 5S / 15S DNA |
 | Layer-2 | `aligned_candle_engine.py` | Combined 1S → Aligned 1M / 5M / 15M / 1H / 4H / 1D DNA |
+| Layer-3 | `historical_baseline_engine.py` | All DNA files → ATR / VWAP / CVD / Percentile baseline |
 
 ## Layer-0 Output Files
 
@@ -45,6 +46,32 @@ All three engines write anomaly and status events to:
 | File | Description |
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
+## Layer-3 Historical Baseline + Context Metrics Engine
+
+Reads all Layer-0/1/2 JSONL DNA files (no Binance API calls) and produces
+ATR, VWAP, CVD, and percentile/z-score baseline statistics for each timeframe.
+Does **not** emit signals or trade decisions.
+
+| Output | File |
+|---|---|
+| Baseline DNA | `data/historical_baseline_dna.jsonl` |
+
+**Baseline windows:** short=20, medium=100, long=500 records per timeframe.
+
+**Metrics per window:** range, total_volume, buy_volume, sell_volume, delta,
+absolute_delta, trade_count, footprint_price_level_count, bid_update_count,
+ask_update_count, depth_balance, depth_imbalance, close_price — each with
+mean, median, std, p10/p25/p50/p75/p90, latest_percentile, z_score.
+
+**ATR:** True Range 14-period simple average with percentile/z-score context and
+status (`normal` / `high` / `extreme_high` / `low` / `extreme_low`).
+
+**VWAP:** Cumulative session VWAP (resets daily at UTC 00:00). Reports
+`price_vs_vwap` (`above`/`below`/`at`/`unknown`) and distance in absolute and %.
+
+**CVD:** Cumulative Volume Delta (session-scoped), with `cvd_direction`
+(`rising`/`falling`/`flat`).
 
 ## Validator Output
 
@@ -104,6 +131,11 @@ python3 watchdog.py
 # Terminal 5 — Validator (Binance REST comparison + SYSTEM_HALT)
 python3 validator.py
 
+# Terminal 6 — Layer-3 Baseline (batch: one-shot; live: continuous)
+python3 historical_baseline_engine.py --mode batch
+python3 historical_baseline_engine.py --mode live
+FULL_PRINT=true python3 historical_baseline_engine.py --mode batch
+
 # Optional Telegram alerts:
 # export TELEGRAM_BOT_TOKEN=<your bot token>
 # export TELEGRAM_CHAT_ID=<your chat id>
@@ -131,6 +163,10 @@ python watchdog.py
 
 # Terminal 5
 python validator.py
+
+# Terminal 6
+python historical_baseline_engine.py --mode batch
+python historical_baseline_engine.py --mode live
 ```
 
 ## Log Rotation
