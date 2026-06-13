@@ -25,6 +25,7 @@ OUTPUT_3S   = os.path.join("data", "rolling_3s_dna.jsonl")
 OUTPUT_5S   = os.path.join("data", "rolling_5s_dna.jsonl")
 OUTPUT_15S  = os.path.join("data", "rolling_15s_dna.jsonl")
 DQ_LOG_FILE = os.path.join("data", "data_quality_log.jsonl")
+HALT_FILE   = os.path.join("data", "SYSTEM_HALT")
 
 WINDOW_SIZES   = [3, 5, 15]
 OUTPUT_FILES   = {3: OUTPUT_3S, 5: OUTPUT_5S, 15: OUTPUT_15S}
@@ -32,6 +33,19 @@ OUTPUT_FILES   = {3: OUTPUT_3S, 5: OUTPUT_5S, 15: OUTPUT_15S}
 FULL_PRINT         = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL      = 0.05   # seconds between readline retries when no new data
 FILE_WAIT_INTERVAL = 0.5    # seconds between checks when input file doesn't exist yet
+
+
+# ── SYSTEM_HALT check ────────────────────────────────────────────────────────
+def _check_system_halt() -> None:
+    if os.path.exists(HALT_FILE):
+        try:
+            with open(HALT_FILE, "r", encoding="utf-8") as fh:
+                halt_info = json.loads(fh.read().strip())
+            reason = halt_info.get("reason", "unknown")
+        except Exception:
+            reason = "unknown"
+        print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
+        sys.exit(1)
 
 
 # ── Data quality log ──────────────────────────────────────────────────────────
@@ -360,6 +374,7 @@ def follow_jsonl(path: str):
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     os.makedirs("data", exist_ok=True)
+    _check_system_halt()
     _log_quality("engine_started", {"script": "rolling_window_engine.py"})
 
     print("NurtacCoreEngineClaude — Layer-1 Rolling Window Engine")
@@ -373,6 +388,7 @@ def main() -> None:
     last_ts: Optional[int] = None
 
     for record in follow_jsonl(INPUT_FILE):
+        _check_system_halt()
         ts = record["window_start_ts"]
 
         # Gap detection: source timestamps must be consecutive 1-second steps

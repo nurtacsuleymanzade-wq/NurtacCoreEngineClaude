@@ -15,13 +15,15 @@ Run alongside Layer-0 and optionally Layer-1:
 
 import json
 import os
+import sys
 import time
 from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SYMBOL     = "BTCUSDT"
-INPUT_FILE = os.path.join("data", "combined_1s_dna_btcusdt.jsonl")
+INPUT_FILE  = os.path.join("data", "combined_1s_dna_btcusdt.jsonl")
 DQ_LOG_FILE = os.path.join("data", "data_quality_log.jsonl")
+HALT_FILE   = os.path.join("data", "SYSTEM_HALT")
 
 OUTPUT_FILES = {
     "1M":  os.path.join("data", "aligned_1m_candle_dna.jsonl"),
@@ -66,6 +68,19 @@ _NEXT_TF = {"1M": "5M", "5M": "15M", "15M": "1H", "1H": "4H", "4H": "1D"}
 FULL_PRINT         = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL      = 0.05
 FILE_WAIT_INTERVAL = 0.5
+
+
+# ── SYSTEM_HALT check ────────────────────────────────────────────────────────
+def _check_system_halt() -> None:
+    if os.path.exists(HALT_FILE):
+        try:
+            with open(HALT_FILE, "r", encoding="utf-8") as fh:
+                halt_info = json.loads(fh.read().strip())
+            reason = halt_info.get("reason", "unknown")
+        except Exception:
+            reason = "unknown"
+        print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
+        sys.exit(1)
 
 
 # ── Data quality log ──────────────────────────────────────────────────────────
@@ -617,6 +632,7 @@ class AlignedCandleEngine:
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     os.makedirs("data", exist_ok=True)
+    _check_system_halt()
     _log_quality("engine_started", {"script": "aligned_candle_engine.py"})
 
     print("NurtacCoreEngineClaude — Layer-2 Aligned Candle Engine")
@@ -626,6 +642,7 @@ def main() -> None:
 
     engine = AlignedCandleEngine()
     for record in _follow_jsonl(INPUT_FILE):
+        _check_system_halt()
         engine.on_1s(record)
 
 

@@ -30,54 +30,21 @@ from typing import Optional
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-try:
-    import requests as _requests
-    _REQUESTS_AVAILABLE = True
-except ImportError:
-    _REQUESTS_AVAILABLE = False
+from notify import send_telegram
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_DIR          = "data"
-COMBINED_FILE     = os.path.join(DATA_DIR, "combined_1s_dna_btcusdt.jsonl")
-DQ_LOG_FILE       = os.path.join(DATA_DIR, "data_quality_log.jsonl")
+DATA_DIR      = "data"
+COMBINED_FILE = os.path.join(DATA_DIR, "combined_1s_dna_btcusdt.jsonl")
+DQ_LOG_FILE   = os.path.join(DATA_DIR, "data_quality_log.jsonl")
 
-POLL_INTERVAL_S   = 30          # seconds between each watchdog cycle
-DATA_STALE_MS     = 15_000      # alert if last record is older than this
-DISK_WARN_PCT     = 85.0        # alert if disk usage exceeds this %
-TELEGRAM_COOLDOWN = 300         # seconds; minimum gap between same-type Telegram alerts
-
-
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-# Per-alert-type last-sent timestamps for Telegram spam prevention
-_tg_last_sent: dict[str, float] = {}
-
-
-# ── Telegram helper ───────────────────────────────────────────────────────────
-def _send_telegram(alert_type: str, message: str) -> None:
-    if not (_REQUESTS_AVAILABLE and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        return
-
-    now = time.time()
-    if now - _tg_last_sent.get(alert_type, 0.0) < TELEGRAM_COOLDOWN:
-        return  # cooldown active — silent skip
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        _requests.post(
-            url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
-        _tg_last_sent[alert_type] = now
-    except Exception:
-        pass  # never crash the watchdog over a Telegram failure
+POLL_INTERVAL_S = 30      # seconds between each watchdog cycle
+DATA_STALE_MS   = 15_000  # alert if last record is older than this
+DISK_WARN_PCT   = 85.0    # alert if disk usage exceeds this %
 
 
 def _alert(alert_type: str, message: str) -> None:
     print(f"[WATCHDOG ALERT] {message}")
-    _send_telegram(alert_type, f"[NurtacCoreEngine ALERT] {message}")
+    send_telegram(alert_type, f"[NurtacCoreEngine ALERT] {message}")
 
 
 # ── Check helpers ─────────────────────────────────────────────────────────────
@@ -196,6 +163,7 @@ def main() -> None:
     print(f"Poll interval : {POLL_INTERVAL_S}s")
     print(f"Data stale    : >{DATA_STALE_MS // 1000}s")
     print(f"Disk warn     : >{DISK_WARN_PCT}%")
+    from notify import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     print(
         f"Telegram      : {'configured' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else 'not configured (silent)'}"
     )

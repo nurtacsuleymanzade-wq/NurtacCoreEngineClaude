@@ -46,6 +46,36 @@ All three engines write anomaly and status events to:
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
 
+## Validator Output
+
+| File | Description |
+|---|---|
+| `data/validation_report.jsonl` | Per-candle comparison: our values vs Binance REST kline (close/high/low, diff %, status) |
+| `data/SYSTEM_HALT` | Created by validator on critical divergence; presence halts all engines |
+
+## SYSTEM HALT
+
+When the validator detects a critical price divergence (`data/SYSTEM_HALT` is created):
+
+- All engines (`main.py`, `rolling_window_engine.py`, `aligned_candle_engine.py`) detect the file at the start of their next loop iteration and exit with code 1.
+- The halt file contains a JSON object with `ts`, `reason`, and the triggering validation report entry.
+
+**HALT'tan çıkmak için `data/SYSTEM_HALT` dosyasını MANUEL silmen ve sorunu incelemen gerekir.** Dosya silinmeden hiçbir engine yeniden başlatıldığında çalışmaya devam etmez (systemd `Restart=always` olsa bile engine başlar ve hemen tekrar çıkar).
+
+```bash
+# HALT nedenini incele
+cat data/SYSTEM_HALT
+
+# Validation raporunu incele
+tail -20 data/validation_report.jsonl
+
+# Sorun incelendikten sonra HALT'ı kaldır
+rm data/SYSTEM_HALT
+
+# Engine'leri yeniden başlat
+sudo systemctl restart nurtac-layer0 nurtac-layer1 nurtac-layer2 nurtac-watchdog nurtac-validator
+```
+
 ## Setup & Run
 
 **Linux / macOS**
@@ -71,10 +101,13 @@ FULL_PRINT=true python3 aligned_candle_engine.py
 # Terminal 4 — Watchdog (data freshness + disk + stream health)
 python3 watchdog.py
 
+# Terminal 5 — Validator (Binance REST comparison + SYSTEM_HALT)
+python3 validator.py
+
 # Optional Telegram alerts:
 # export TELEGRAM_BOT_TOKEN=<your bot token>
 # export TELEGRAM_CHAT_ID=<your chat id>
-# python3 watchdog.py
+# python3 watchdog.py   # or validator.py — both read the same env vars
 ```
 
 **Windows**
@@ -95,6 +128,9 @@ python aligned_candle_engine.py
 
 # Terminal 4
 python watchdog.py
+
+# Terminal 5
+python validator.py
 ```
 
 ## Log Rotation
@@ -125,7 +161,7 @@ Service files are in `deploy/`. Copy them to `/etc/systemd/system/` and enable:
 ```bash
 sudo cp deploy/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now nurtac-layer0 nurtac-layer1 nurtac-layer2 nurtac-watchdog
+sudo systemctl enable --now nurtac-layer0 nurtac-layer1 nurtac-layer2 nurtac-watchdog nurtac-validator
 ```
 
 To configure Telegram alerts in the watchdog service, edit

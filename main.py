@@ -43,6 +43,7 @@ FOOTPRINT_FILE = os.path.join(DATA_DIR, "footprint_dna_btcusdt.jsonl")
 DEPTH_FILE     = os.path.join(DATA_DIR, "depth_dna_btcusdt.jsonl")
 COMBINED_FILE  = os.path.join(DATA_DIR, "combined_1s_dna_btcusdt.jsonl")
 DQ_LOG_FILE    = os.path.join(DATA_DIR, "data_quality_log.jsonl")
+HALT_FILE      = os.path.join(DATA_DIR, "SYSTEM_HALT")
 
 # Exponential backoff in seconds; last value is used for all subsequent retries
 BACKOFF_DELAYS = [1, 2, 4, 8, 16, 30]
@@ -96,6 +97,19 @@ _depth_schema_checked = False
 # Reconnect detection (True after first successful connection)
 _trade_ever_connected = False
 _depth_ever_connected = False
+
+
+# ── SYSTEM_HALT check ────────────────────────────────────────────────────────
+def _check_system_halt() -> None:
+    if os.path.exists(HALT_FILE):
+        try:
+            with open(HALT_FILE, "r", encoding="utf-8") as fh:
+                halt_info = json.loads(fh.read().strip())
+            reason = halt_info.get("reason", "unknown")
+        except Exception:
+            reason = "unknown"
+        print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
+        sys.exit(1)
 
 
 # ── Data quality log ──────────────────────────────────────────────────────────
@@ -557,6 +571,9 @@ async def _scheduler() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     _log_quality("engine_started", {"script": "main.py"})
 
+    # Refuse to start if SYSTEM_HALT already exists
+    _check_system_halt()
+
     # Block until at least one trade AND one depth event have been received
     print("Warm-up: waiting for first trade and depth event...")
     while True:
@@ -573,6 +590,8 @@ async def _scheduler() -> None:
 
     while True:
         await asyncio.sleep(0.05)
+
+        _check_system_halt()
 
         now_ms = int(time.time() * 1000)
 
