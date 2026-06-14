@@ -13,6 +13,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-4 | `detector_engine.py` | 6 parallel detectors → Absorption / Sweep / Exhaustion / Iceberg / Trapped Trader / Initiative Flow labels |
 | Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
 | Layer-6 | `smart_money_engine.py` | 5 timeframes → Market structure (Swings / BOS / CHoCH / MSB / OB / FVG) |
+| Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline) → Evidence stream + Setup generator |
 
 ## Layer-0 Output Files
 
@@ -49,6 +50,31 @@ All three engines write anomaly and status events to:
 | File | Description |
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
+## Layer-7 Evidence Accumulator + Setup Generator
+
+Reads all lower-layer outputs; triggered by each new 1S bar with `has_trade=true`.
+Computes long and short evidence scores from 5 source categories, then checks
+setup conditions. No signals, no orders — structural setup records only.
+
+| Output | File |
+|---|---|
+| Evidence stream | `data/evidence_stream.jsonl` |
+| Setups | `data/setups.jsonl` |
+
+```bash
+python3 evidence_engine.py --mode batch
+python3 evidence_engine.py --mode live
+FULL_PRINT=true python3 evidence_engine.py --mode live
+```
+
+**Evidence sources:** Candle DNA (delta/volume/depth) · Gate grade ·
+Smart Money (1S/1M/5M structure: BOS/CHoCH/MSB/trend) · 6 Detectors ·
+Baseline (VWAP/CVD/ATR context)
+
+**Setup conditions:** dominant_side + min score (8.0 normal / 12.0 flash) +
+gate grade A/B + trend/BOS alignment + active OB/FVG + no counter-trend upper TF.
+Entry/SL/TP computed from ATR with optional OB-based SL refinement.
 
 ## Layer-6 Smart Money Engine
 

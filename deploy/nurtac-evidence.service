@@ -1,0 +1,15 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-7 Evidence Engine
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 evidence_engine.py --mode live
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

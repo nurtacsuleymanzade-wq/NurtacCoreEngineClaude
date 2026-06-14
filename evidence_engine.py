@@ -1,0 +1,983 @@
+"""
+NurtacCoreEngineClaude — Layer-7: Evidence Accumulator + Setup Generator
+
+Primary trigger: data/combined_1s_dna_btcusdt.jsonl
+Reads:  gate, structure (1S/1M/5M), 6 detectors, baseline
+Writes: data/evidence_stream.jsonl
+        data/setups.jsonl
+
+Rules:
+  - No Binance API/WebSocket calls
+  - No mock data
+  - Only reads existing JSONL files
+  - No real orders — setup records only
+  - Never crash, never write invalid records
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# ── Config ───────────────────────────────────────────────────────────────────────
+SYMBOL    = "BTCUSDT"
+DATA_DIR  = Path("data")
+HALT_FILE = DATA_DIR / "SYSTEM_HALT"
+FULL_PRINT = os.environ.get("FULL_PRINT", "false").lower() == "true"
+POLL_SLEEP = 0.05
+
+EVIDENCE_FILE = DATA_DIR / "evidence_stream.jsonl"
+SETUPS_FILE   = DATA_DIR / "setups.jsonl"
+
+PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
+GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
+STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
+STRUCT_1M_FILE = DATA_DIR / "structure_1m.jsonl"
+STRUCT_5M_FILE = DATA_DIR / "structure_5m.jsonl"
+BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
+
+DETECTOR_FILES = {
+    "absorption":      DATA_DIR / "labels_absorption.jsonl",
+    "sweep":           DATA_DIR / "labels_sweep.jsonl",
+    "exhaustion":      DATA_DIR / "labels_exhaustion.jsonl",
+    "initiative_flow": DATA_DIR / "labels_initiative_flow.jsonl",
+    "trapped_trader":  DATA_DIR / "labels_trapped_trader.jsonl",
+    "iceberg":         DATA_DIR / "labels_iceberg.jsonl",
+}
+
+MIN_LONG_SCORE_NORMAL = 8.0
+MIN_LONG_SCORE_FLASH  = 12.0
+DOMINANT_GAP_MIN      = 2.0
+ATR_MULTIPLIER_SL     = 1.5
+ATR_MULTIPLIER_TP1    = 1.5
+ATR_MULTIPLIER_TP2    = 3.0
+ATR_MULTIPLIER_TP3    = 4.5
+NORMAL_COOLDOWN_MS    = 30_000
+FLASH_COOLDOWN_MS     = 15_000
+MAX_OPEN_SETUPS       = 3
+
+# ── Helpers ───────────────────────────────────────────────────────────────────────
+def _sf(v, default: float = 0.0) -> float:
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        return f if (f == f and abs(f) != float("inf")) else default
+    except (TypeError, ValueError):
+        return default
+
+def _read_all_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except OSError:
+        pass
+    return records
+
+def _build_exact_index(records: list[dict]) -> dict[int, dict]:
+    """Index records by window_start_ts. Latest record wins on duplicate ts."""
+    idx: dict[int, dict] = {}
+    for rec in records:
+        ts = rec.get("window_start_ts")
+        if ts is not None:
+            idx[int(ts)] = rec
+    return idx
+
+def _get_latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
+    """Return the record with the largest ts <= given ts."""
+    candidates = [k for k in idx if k <= ts]
+    if not candidates:
+        return None
+    return idx[max(candidates)]
+
+def _write_jsonl(fh, rec: dict) -> None:
+    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+
+# ── Setup state ────────────────────────────────────────────────────────────────────
+class SetupState:
+    def __init__(self):
+        self.open_setups: list[dict] = []
+        self.last_normal_long_ts:  int = 0
+        self.last_normal_short_ts: int = 0
+        self.last_flash_long_ts:   int = 0
+        self.last_flash_short_ts:  int = 0
+        self.emitted_ids: set[str] = set()
+
+# ── Evidence computation ───────────────────────────────────────────────────────────
+def _score_detectors(det_recs: dict[str, dict | None]) -> tuple[float, float, dict]:
+    """Compute detector contribution to long/short scores."""
+    long_add  = 0.0
+    short_add = 0.0
+    comps: dict[str, dict] = {}
+
+    def _strength(label: str | None, is_strong: bool) -> float:
+        if label is None:
+            return 0.0
+        if "strong" in label:
+            return 2.0 if is_strong else 1.5
+        if "candidate" in label:
+            return 1.0 if is_strong else 0.75
+        return 0.0
+
+    # Absorption
+    rec = det_recs.get("absorption")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+    if drn == "sell_absorbed":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+    elif drn == "buy_absorbed":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+    comps["absorption"] = {"label": lbl, "direction": drn}
+
+    # Sweep
+    rec = det_recs.get("sweep")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+    if drn == "downward_sweep":
+        v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+    elif drn == "upward_sweep":
+        v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+    comps["sweep"] = {"label": lbl, "direction": drn}
+
+    # Exhaustion
+    rec = det_recs.get("exhaustion")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+    if drn == "sell_exhaustion":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+    elif drn == "buy_exhaustion":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+    comps["exhaustion"] = {"label": lbl, "direction": drn}
+
+    # Initiative flow
+    rec = det_recs.get("initiative_flow")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+    if drn == "buy_initiative":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+    elif drn == "sell_initiative":
+        v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+    comps["initiative_flow"] = {"label": lbl, "direction": drn}
+
+    # Trapped trader
+    rec = det_recs.get("trapped_trader")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+    if drn == "short_trapped":
+        v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+    elif drn == "long_trapped":
+        v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+    comps["trapped_trader"] = {"label": lbl, "direction": drn}
+
+    # Iceberg — constraint: only counts if at least 1 other bullish/bearish detector fires
+    rec = det_recs.get("iceberg")
+    lbl = (rec or {}).get("label", "none")
+    drn = (rec or {}).get("direction")
+
+    _bull_dets = {
+        "absorption": "sell_absorbed", "sweep": "downward_sweep",
+        "exhaustion": "sell_exhaustion", "initiative_flow": "buy_initiative",
+        "trapped_trader": "short_trapped",
+    }
+    _bear_dets = {
+        "absorption": "buy_absorbed", "sweep": "upward_sweep",
+        "exhaustion": "buy_exhaustion", "initiative_flow": "sell_initiative",
+        "trapped_trader": "long_trapped",
+    }
+    other_bull = sum(
+        1 for d, expected_dir in _bull_dets.items()
+        if (det_recs.get(d) or {}).get("direction") == expected_dir
+    )
+    other_bear = sum(
+        1 for d, expected_dir in _bear_dets.items()
+        if (det_recs.get(d) or {}).get("direction") == expected_dir
+    )
+    iceberg_counted = False
+    if drn == "bid_iceberg" and other_bull >= 1:
+        v = 1.0 if lbl and "strong" in lbl else (0.5 if lbl and "candidate" in lbl else 0.0)
+        long_add += v
+        iceberg_counted = v > 0
+    elif drn == "ask_iceberg" and other_bear >= 1:
+        v = 1.0 if lbl and "strong" in lbl else (0.5 if lbl and "candidate" in lbl else 0.0)
+        short_add += v
+        iceberg_counted = v > 0
+    comps["iceberg"] = {"label": lbl, "direction": drn, "iceberg_counted": iceberg_counted}
+
+    return long_add, short_add, comps
+
+def compute_evidence(
+    primary: dict,
+    gate:    dict | None,
+    s1s:     dict | None,
+    s1m:     dict | None,
+    s5m:     dict | None,
+    det_recs: dict[str, dict | None],
+    baseline: dict | None,
+) -> dict:
+    """Compute long_score and short_score for one 1S bar."""
+    long_score  = 0.0
+    short_score = 0.0
+    comps: dict[str, dict] = {}
+
+    # ── A. Candle DNA ─────────────────────────────────────────────────────────────
+    cdna = primary.get("candle_dna") or {}
+    ddna = primary.get("depth_dna") or {}
+    delta        = _sf(cdna.get("delta"), 0.0)
+    buy_vol      = _sf(cdna.get("buy_volume"), 0.0)
+    sell_vol     = _sf(cdna.get("sell_volume"), 0.0)
+    total_vol    = _sf(cdna.get("total_volume"), 0.0)
+    depth_side   = ddna.get("dominant_side", "")   # "BID" or "ASK"
+
+    d_pos  = delta > 0
+    d_neg  = delta < 0
+    d_spos = d_pos and total_vol > 0 and buy_vol  > total_vol * 0.70
+    d_sneg = d_neg and total_vol > 0 and sell_vol > total_vol * 0.70
+    d_bid  = depth_side == "BID"
+    d_ask  = depth_side == "ASK"
+
+    if d_pos:  long_score  += 1.0
+    if d_neg:  short_score += 1.0
+    if d_spos: long_score  += 0.5
+    if d_sneg: short_score += 0.5
+    if d_bid:  long_score  += 0.5
+    if d_ask:  short_score += 0.5
+
+    comps["candle_dna"] = {
+        "delta_positive":       d_pos,
+        "delta_negative":       d_neg,
+        "delta_strong_positive": d_spos,
+        "delta_strong_negative": d_sneg,
+        "depth_bid_dominant":   d_bid,
+        "depth_ask_dominant":   d_ask,
+    }
+
+    # ── B. Gate ───────────────────────────────────────────────────────────────────
+    gate_grade = None
+    gate_dir   = None
+    g_comp: dict[str, bool] = {}
+    if gate:
+        gate_grade = gate.get("setup_grade")
+        gate_dir   = gate.get("dominant_direction")
+        for grade, pts in [("A", 3.0), ("B", 2.0), ("C", 1.0)]:
+            gb = gate_grade == grade and gate_dir == "bullish"
+            bb = gate_grade == grade and gate_dir == "bearish"
+            g_comp[f"gate_bullish_{grade}"] = gb
+            g_comp[f"gate_bearish_{grade}"] = bb
+            if gb: long_score  += pts
+            if bb: short_score += pts
+    g_comp["grade"]     = gate_grade
+    g_comp["direction"] = gate_dir
+    comps["gate"] = g_comp
+
+    # ── C. Smart Money ────────────────────────────────────────────────────────────
+    # 1S structure
+    s1s_trend = (s1s or {}).get("trend") or {}
+    s1s_bos   = (s1s or {}).get("bos") or {}
+    micro_bos       = s1s_bos.get("micro_bos")
+    s1s_dir         = s1s_trend.get("direction", "unknown")
+    choch_confirmed = s1s_trend.get("choch_confirmed")
+    msb             = s1s_trend.get("msb")
+
+    sm1s: dict[str, bool] = {}
+    sm1s["micro_bos_bullish"] = micro_bos == "bullish"
+    sm1s["micro_bos_bearish"] = micro_bos == "bearish"
+    sm1s["trend_uptrend"]     = s1s_dir == "uptrend"
+    sm1s["trend_downtrend"]   = s1s_dir == "downtrend"
+    sm1s["choch_bullish"]     = choch_confirmed == "bullish"
+    sm1s["choch_bearish"]     = choch_confirmed == "bearish"
+    sm1s["msb_bullish"]       = msb == "bullish"
+    sm1s["msb_bearish"]       = msb == "bearish"
+
+    if sm1s["micro_bos_bullish"]: long_score  += 2.0
+    if sm1s["micro_bos_bearish"]: short_score += 2.0
+    if sm1s["trend_uptrend"]:     long_score  += 1.0
+    if sm1s["trend_downtrend"]:   short_score += 1.0
+    if sm1s["choch_bullish"]:     long_score  += 2.5
+    if sm1s["choch_bearish"]:     short_score += 2.5
+    if sm1s["msb_bullish"]:       long_score  += 1.5
+    if sm1s["msb_bearish"]:       short_score += 1.5
+    comps["smart_money_1s"] = sm1s
+
+    # 1M structure
+    s1m_trend  = (s1m or {}).get("trend") or {}
+    s1m_bos    = (s1m or {}).get("bos") or {}
+    macro_bos  = s1m_bos.get("macro_bos")
+    macro_tf   = s1m_bos.get("macro_bos_tf")
+    s1m_dir    = s1m_trend.get("direction", "unknown")
+
+    sm1m: dict[str, bool] = {}
+    sm1m["macro_bos_bullish"] = macro_bos == "bullish" and macro_tf == "1M"
+    sm1m["macro_bos_bearish"] = macro_bos == "bearish" and macro_tf == "1M"
+    sm1m["trend_uptrend_1m"]  = s1m_dir == "uptrend"
+    sm1m["trend_downtrend_1m"] = s1m_dir == "downtrend"
+
+    if sm1m["macro_bos_bullish"]: long_score  += 2.0
+    if sm1m["macro_bos_bearish"]: short_score += 2.0
+    if sm1m["trend_uptrend_1m"]:  long_score  += 1.5
+    if sm1m["trend_downtrend_1m"]: short_score += 1.5
+    comps["smart_money_1m"] = sm1m
+
+    # 5M structure
+    s5m_trend = (s5m or {}).get("trend") or {}
+    s5m_dir   = s5m_trend.get("direction", "unknown")
+
+    sm5m: dict[str, bool] = {}
+    sm5m["trend_uptrend_5m"]  = s5m_dir == "uptrend"
+    sm5m["trend_downtrend_5m"] = s5m_dir == "downtrend"
+
+    if sm5m["trend_uptrend_5m"]:  long_score  += 1.0
+    if sm5m["trend_downtrend_5m"]: short_score += 1.0
+    comps["smart_money_5m"] = sm5m
+
+    # ── D. Detectors ──────────────────────────────────────────────────────────────
+    det_long, det_short, det_comps = _score_detectors(det_recs)
+    long_score  += det_long
+    short_score += det_short
+    comps["detectors"] = det_comps
+
+    # ── E. Baseline ───────────────────────────────────────────────────────────────
+    bl1m      = None
+    bl_vwap   = None
+    bl_cvd    = None
+    bl_atr_st = None
+    if baseline:
+        bl_vwap   = (baseline.get("vwap") or {}).get("price_vs_vwap")
+        bl_cvd    = (baseline.get("cvd") or {}).get("cvd_direction")
+        bl_atr_st = (baseline.get("atr") or {}).get("atr_status")
+
+    bl_comp: dict = {}
+    bl_comp["vwap_above"]    = bl_vwap == "above"
+    bl_comp["vwap_below"]    = bl_vwap == "below"
+    bl_comp["cvd_rising"]    = bl_cvd  == "rising"
+    bl_comp["cvd_falling"]   = bl_cvd  == "falling"
+    bl_comp["atr_extreme_high"] = bl_atr_st == "extreme_high"
+
+    if bl_comp["vwap_above"]:  long_score  += 0.5
+    if bl_comp["vwap_below"]:  short_score += 0.5
+    if bl_comp["cvd_rising"]:  long_score  += 0.5
+    if bl_comp["cvd_falling"]: short_score += 0.5
+    comps["baseline"] = bl_comp
+
+    # ATR extreme_high → scale down both scores
+    if bl_comp["atr_extreme_high"]:
+        long_score  *= 0.85
+        short_score *= 0.85
+
+    # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
+    long_score  = max(0.0, long_score)
+    short_score = max(0.0, short_score)
+
+    # ── Dominant side ─────────────────────────────────────────────────────────────
+    score_gap = abs(long_score - short_score)
+    if long_score > short_score and score_gap >= DOMINANT_GAP_MIN:
+        dominant = "long"
+    elif short_score > long_score and score_gap >= DOMINANT_GAP_MIN:
+        dominant = "short"
+    else:
+        dominant = "neutral"
+
+    ts = int(primary.get("window_start_ts", 0))
+    wte = int(primary.get("window_end_ts", ts + 1000))
+
+    return {
+        "engine":          "evidence_accumulator",
+        "symbol":          SYMBOL,
+        "window_start_ts": ts,
+        "window_end_ts":   wte,
+        "long_score":      round(long_score,  4),
+        "short_score":     round(short_score, 4),
+        "dominant_side":   dominant,
+        "score_gap":       round(score_gap, 4),
+        "evidence_components": comps,
+        "data_sources_available": {
+            "gate":        gate is not None,
+            "structure_1s": s1s is not None,
+            "structure_1m": s1m is not None,
+            "structure_5m": s5m is not None,
+            "baseline":    baseline is not None,
+        },
+    }
+
+# ── Validation ────────────────────────────────────────────────────────────────────
+def _validate_evidence(rec: dict) -> list[str]:
+    errors: list[str] = []
+    ls = _sf(rec.get("long_score"),  -1.0)
+    ss = _sf(rec.get("short_score"), -1.0)
+    if ls < 0 or ls != ls or abs(ls) == float("inf"):
+        errors.append(f"[1] long_score invalid: {ls}")
+    if ss < 0 or ss != ss or abs(ss) == float("inf"):
+        errors.append(f"[1] short_score invalid: {ss}")
+    if rec.get("dominant_side") not in ("long", "short", "neutral"):
+        errors.append(f"[2] dominant_side invalid: {rec.get('dominant_side')}")
+    expected_gap = round(abs(ls - ss), 4)
+    if abs(_sf(rec.get("score_gap"), -999) - expected_gap) > 1e-6:
+        errors.append(f"[3] score_gap mismatch: {rec.get('score_gap')} vs {expected_gap}")
+    return errors
+
+def _validate_setup(rec: dict) -> list[str]:
+    errors: list[str] = []
+    direction = rec.get("direction")
+    stype     = rec.get("setup_type")
+
+    if direction not in ("long", "short"):
+        errors.append(f"[4] direction invalid: {direction}")
+    if stype not in ("normal", "flash"):
+        errors.append(f"[5] setup_type invalid: {stype}")
+
+    entry = _sf((rec.get("entry") or {}).get("price"), 0.0)
+    sl    = _sf((rec.get("sl")   or {}).get("price"), 0.0)
+    tp1   = _sf((rec.get("tp1")  or {}).get("price"), 0.0)
+    tp2   = _sf((rec.get("tp2")  or {}).get("price"), 0.0)
+    tp3   = _sf((rec.get("tp3")  or {}).get("price"), 0.0)
+
+    if direction == "long":
+        if not (sl < entry < tp1 < tp2 < tp3):
+            errors.append(f"[6] long price order: sl={sl} entry={entry} tp1={tp1} tp2={tp2} tp3={tp3}")
+    elif direction == "short":
+        if not (sl > entry > tp1 > tp2 > tp3):
+            errors.append(f"[7] short price order: sl={sl} entry={entry} tp1={tp1} tp2={tp2} tp3={tp3}")
+
+    if not (_sf(rec.get("atr_used"), 0.0) > 0):
+        errors.append(f"[8] atr_used <= 0: {rec.get('atr_used')}")
+
+    tc = rec.get("trigger_conditions") or {}
+    if not all(isinstance(v, bool) for v in tc.values()):
+        errors.append(f"[9] trigger_conditions not all bool: {tc}")
+
+    if stype == "normal":
+        if len(tc) != 7 or not all(tc.values()):
+            errors.append(f"[10] normal setup trigger_conditions not all True: {tc}")
+    elif stype == "flash":
+        if len(tc) != 5:
+            errors.append(f"[11] flash setup must have 5 conditions, got {len(tc)}")
+
+    return errors
+
+# ── ATR resolution ─────────────────────────────────────────────────────────────────
+def _resolve_atr(baseline: dict | None, s1s: dict | None) -> float:
+    if baseline:
+        val = _sf((baseline.get("atr") or {}).get("atr"), 0.0)
+        if val > 0:
+            return val
+    if s1s:
+        val = _sf(s1s.get("atr_used"), 0.0)
+        if val > 0:
+            return val
+    return 1.0
+
+# ── Setup generation ───────────────────────────────────────────────────────────────
+def _check_active_ob_fvg(structure: dict | None, direction: str) -> tuple[int, int, list[dict]]:
+    """Return (active_ob_count, active_fvg_count, active_bull_obs)."""
+    if structure is None:
+        return 0, 0, []
+    obs  = structure.get("order_blocks") or []
+    fvgs = structure.get("fvg") or []
+
+    prefix_ob  = "bullish_ob"  if direction == "long" else "bearish_ob"
+    prefix_fvg = "bullish_fvg" if direction == "long" else "bearish_fvg"
+
+    active_obs = [ob for ob in obs
+                  if ob.get("ob_type") == prefix_ob and ob.get("status") == "active"]
+    active_fvgs = [f for f in fvgs
+                   if f.get("fvg_type") == prefix_fvg and f.get("status") == "active"]
+    return len(active_obs), len(active_fvgs), active_obs
+
+def _refine_sl(sl_price: float, direction: str, active_obs: list[dict], atr: float) -> float:
+    if not active_obs:
+        return sl_price
+    if direction == "long":
+        lowest_ob_low = min(ob["ob_low"] for ob in active_obs)
+        return max(sl_price, lowest_ob_low - atr * 0.1)
+    else:
+        highest_ob_high = max(ob["ob_high"] for ob in active_obs)
+        return min(sl_price, highest_ob_high + atr * 0.1)
+
+def try_generate_setup(
+    ev: dict,
+    gate: dict | None,
+    s1s: dict | None,
+    s1m: dict | None,
+    s5m: dict | None,
+    det_recs: dict[str, dict | None],
+    baseline: dict | None,
+    primary: dict,
+    state: SetupState,
+    setups_fh,
+) -> None:
+    """Check setup conditions and write to setups.jsonl if triggered."""
+    ts  = ev["window_start_ts"]
+    wte = ev["window_end_ts"]
+    dominant = ev["dominant_side"]
+    ls  = ev["long_score"]
+    ss  = ev["short_score"]
+
+    atr = _resolve_atr(baseline, s1s)
+
+    cdna        = primary.get("candle_dna") or {}
+    entry_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
+    if entry_price <= 0:
+        return
+
+    gate_grade = (gate or {}).get("setup_grade")
+    gate_dir   = (gate or {}).get("dominant_direction")
+    s1s_trend  = (s1s or {}).get("trend") or {}
+    s1s_bos    = (s1s or {}).get("bos") or {}
+    s1m_trend  = (s1m or {}).get("trend") or {}
+    s5m_trend  = (s5m or {}).get("trend") or {}
+    micro_bos  = s1s_bos.get("micro_bos")
+    choch_conf = s1s_trend.get("choch_confirmed")
+    msb_val    = s1s_trend.get("msb")
+    trend_1s   = s1s_trend.get("direction", "unknown")
+    trend_1m   = s1m_trend.get("direction", "unknown")
+    trend_5m   = s5m_trend.get("direction", "unknown")
+
+    initiative_rec = det_recs.get("initiative_flow") or {}
+    initiative_lbl = initiative_rec.get("label", "none")
+    initiative_dir = initiative_rec.get("direction")
+
+    def _make_setup(direction: str, stype: str, tc: dict) -> dict | None:
+        sid = f"{ts}_{direction}_{stype}"
+        if sid in state.emitted_ids:
+            return None
+        if len(state.open_setups) >= MAX_OPEN_SETUPS:
+            return None
+
+        # Cooldown check
+        if stype == "normal":
+            cooldown = NORMAL_COOLDOWN_MS
+            last_ts = (state.last_normal_long_ts if direction == "long"
+                       else state.last_normal_short_ts)
+        else:
+            cooldown = FLASH_COOLDOWN_MS
+            last_ts = (state.last_flash_long_ts if direction == "long"
+                       else state.last_flash_short_ts)
+        if ts - last_ts < cooldown:
+            return None
+
+        # Prices
+        if direction == "long":
+            sl    = entry_price - atr * ATR_MULTIPLIER_SL
+            tp1   = entry_price + atr * ATR_MULTIPLIER_TP1
+            tp2   = entry_price + atr * ATR_MULTIPLIER_TP2
+            tp3   = entry_price + atr * ATR_MULTIPLIER_TP3
+        else:
+            sl    = entry_price + atr * ATR_MULTIPLIER_SL
+            tp1   = entry_price - atr * ATR_MULTIPLIER_TP1
+            tp2   = entry_price - atr * ATR_MULTIPLIER_TP2
+            tp3   = entry_price - atr * ATR_MULTIPLIER_TP3
+
+        # SL refinement
+        _, _, active_obs = _check_active_ob_fvg(s1s, direction)
+        sl = _refine_sl(sl, direction, active_obs, atr)
+
+        ob_count  = len((s1s or {}).get("order_blocks") or [])
+        fvg_count = len((s1s or {}).get("fvg") or [])
+        active_ob_n, active_fvg_n, _ = _check_active_ob_fvg(s1s, direction)
+
+        return {
+            "engine":          "setup_generator",
+            "setup_id":        sid,
+            "symbol":          SYMBOL,
+            "setup_type":      stype,
+            "direction":       direction,
+            "window_start_ts": ts,
+            "window_end_ts":   wte,
+            "entry": {
+                "price":            round(entry_price, 4),
+                "triggered_at_ts":  ts,
+                "timeframe_context": "1S",
+            },
+            "sl":  {"price": round(sl,  4), "atr_multiplier": ATR_MULTIPLIER_SL},
+            "tp1": {"price": round(tp1, 4), "rr": 1.0},
+            "tp2": {"price": round(tp2, 4), "rr": 2.0},
+            "tp3": {"price": round(tp3, 4), "rr": 3.0},
+            "atr_used": round(atr, 4),
+            "trigger_conditions": tc,
+            "scores": {
+                "long_score":  round(ls, 4),
+                "short_score": round(ss, 4),
+                "score_gap":   round(ev["score_gap"], 4),
+            },
+            "context": {
+                "gate_grade":      gate_grade,
+                "micro_bos":       micro_bos,
+                "macro_bos":       (s1m or {}).get("bos", {}).get("macro_bos"),
+                "trend_1s":        trend_1s,
+                "trend_1m":        trend_1m,
+                "trend_5m":        trend_5m,
+                "choch_confirmed": choch_conf,
+                "msb":             msb_val,
+                "active_ob_count": active_ob_n,
+                "active_fvg_count": active_fvg_n,
+            },
+            "status": "open",
+        }
+
+    def _emit(setup: dict) -> None:
+        errs = _validate_setup(setup)
+        if errs:
+            print(f"[EV] SETUP VALIDATION ERROR ts={ts}: {errs}", flush=True)
+            return
+        _write_jsonl(setups_fh, setup)
+        state.emitted_ids.add(setup["setup_id"])
+        state.open_setups.append(setup)
+        d = setup["direction"]
+        st = setup["setup_type"]
+        if st == "normal":
+            if d == "long":  state.last_normal_long_ts  = ts
+            else:            state.last_normal_short_ts = ts
+        else:
+            if d == "long":  state.last_flash_long_ts   = ts
+            else:            state.last_flash_short_ts  = ts
+        # Terminal output
+        _print_setup(setup, ev)
+
+    # ── Try FLASH LONG ────────────────────────────────────────────────────────────
+    flash_active_ob_n, flash_active_fvg_n, _ = _check_active_ob_fvg(s1s, "long")
+    fl_tc = {
+        "F1_score_high":       ls >= MIN_LONG_SCORE_FLASH,
+        "F2_gate_A":           gate_grade == "A",
+        "F3_micro_bos_bullish": micro_bos == "bullish",
+        "F4_initiative_strong": (initiative_lbl == "initiative_strong" and
+                                 initiative_dir == "buy_initiative"),
+        "F5_ob_or_fvg":        (flash_active_ob_n + flash_active_fvg_n) > 0,
+    }
+    if all(fl_tc.values()):
+        setup = _make_setup("long", "flash", fl_tc)
+        if setup:
+            _emit(setup)
+            return
+
+    # ── Try FLASH SHORT ───────────────────────────────────────────────────────────
+    flash_s_ob_n, flash_s_fvg_n, _ = _check_active_ob_fvg(s1s, "short")
+    fs_tc = {
+        "F1_score_high":        ss >= MIN_LONG_SCORE_FLASH,
+        "F2_gate_A":            gate_grade == "A",
+        "F3_micro_bos_bearish": micro_bos == "bearish",
+        "F4_initiative_strong": (initiative_lbl == "initiative_strong" and
+                                 initiative_dir == "sell_initiative"),
+        "F5_ob_or_fvg":         (flash_s_ob_n + flash_s_fvg_n) > 0,
+    }
+    if all(fs_tc.values()):
+        setup = _make_setup("short", "flash", fs_tc)
+        if setup:
+            _emit(setup)
+            return
+
+    # ── Try NORMAL LONG ───────────────────────────────────────────────────────────
+    nl_ob_n, nl_fvg_n, _ = _check_active_ob_fvg(s1s, "long")
+    S6_long = (nl_ob_n + nl_fvg_n) > 0
+    S7_long = not (trend_1m == "downtrend" and trend_5m == "downtrend")
+
+    nl_tc = {
+        "S1_dominant_side": dominant == "long",
+        "S2_min_score":     ls >= MIN_LONG_SCORE_NORMAL,
+        "S3_gate_grade":    gate_grade in ("A", "B"),
+        "S4_1s_trend":      trend_1s in ("uptrend", "ranging"),
+        "S5_bos_or_1m_trend": (micro_bos == "bullish" or trend_1m == "uptrend"),
+        "S6_ob_or_fvg":     S6_long,
+        "S7_not_counter_trend": S7_long,
+    }
+    if all(nl_tc.values()):
+        setup = _make_setup("long", "normal", nl_tc)
+        if setup:
+            _emit(setup)
+            return
+
+    # ── Try NORMAL SHORT ──────────────────────────────────────────────────────────
+    ns_ob_n, ns_fvg_n, _ = _check_active_ob_fvg(s1s, "short")
+    S6_short = (ns_ob_n + ns_fvg_n) > 0
+    S7_short = not (trend_1m == "uptrend" and trend_5m == "uptrend")
+
+    s1s_bos2 = (s1s or {}).get("bos") or {}
+    micro_bos_s = s1s_bos2.get("micro_bos")
+
+    ns_tc = {
+        "S1_dominant_side":     dominant == "short",
+        "S2_min_score":         ss >= MIN_LONG_SCORE_NORMAL,
+        "S3_gate_grade":        gate_grade in ("A", "B"),
+        "S4_1s_trend":          trend_1s in ("downtrend", "ranging"),
+        "S5_bos_or_1m_trend":   (micro_bos_s == "bearish" or trend_1m == "downtrend"),
+        "S6_ob_or_fvg":         S6_short,
+        "S7_not_counter_trend": S7_short,
+    }
+    if all(ns_tc.values()):
+        setup = _make_setup("short", "normal", ns_tc)
+        if setup:
+            _emit(setup)
+
+def _print_setup(setup: dict, ev: dict) -> None:
+    d   = setup["direction"].upper()
+    st  = setup["setup_type"].upper().ljust(6)
+    ts  = setup["window_start_ts"] // 1000
+    ep  = setup["entry"]["price"]
+    sl  = setup["sl"]["price"]
+    tp1 = setup["tp1"]["price"]
+    tp2 = setup["tp2"]["price"]
+    ls  = ev["long_score"]
+    ss  = ev["short_score"]
+    g   = (setup.get("context") or {}).get("gate_grade", "?")
+    bos = (setup.get("context") or {}).get("micro_bos", "?")
+    print(
+        f"[SETUP {d.ljust(5)} {st}] ts={ts} "
+        f"entry={ep:.1f} sl={sl:.1f} tp1={tp1:.1f} tp2={tp2:.1f} "
+        f"score={ls:.1f}/{ss:.1f} gate={g} bos={bos}",
+        flush=True
+    )
+    if FULL_PRINT:
+        print(json.dumps(setup, indent=2), flush=True)
+
+# ── Batch mode ─────────────────────────────────────────────────────────────────────
+def run_batch() -> None:
+    print("[EV] Batch mode — loading all input files", flush=True)
+
+    primary_recs = _read_all_jsonl(PRIMARY_FILE)
+    gate_idx     = _build_exact_index(_read_all_jsonl(GATE_FILE))
+    s1s_idx      = _build_exact_index(_read_all_jsonl(STRUCT_1S_FILE))
+    s1m_idx      = _build_exact_index(_read_all_jsonl(STRUCT_1M_FILE))
+    s5m_idx      = _build_exact_index(_read_all_jsonl(STRUCT_5M_FILE))
+    det_idxs     = {d: _build_exact_index(_read_all_jsonl(p))
+                    for d, p in DETECTOR_FILES.items()}
+
+    # Baseline: latest record per timeframe
+    baseline_1m: dict | None = None
+    for rec in _read_all_jsonl(BASELINE_FILE):
+        if rec.get("timeframe") == "1M":
+            baseline_1m = rec
+
+    state  = SetupState()
+    n_ev   = 0
+    n_skip = 0
+
+    with (open(EVIDENCE_FILE, "a", encoding="utf-8") as ev_fh,
+          open(SETUPS_FILE,   "a", encoding="utf-8") as se_fh):
+
+        for raw in primary_recs:
+            if HALT_FILE.exists():
+                print("[EV] SYSTEM_HALT — aborting batch", flush=True)
+                return
+            cdna = raw.get("candle_dna") or {}
+            if not cdna.get("has_trade"):
+                n_skip += 1
+                continue
+
+            ts  = raw.get("window_start_ts")
+            if ts is None:
+                continue
+            ts = int(ts)
+
+            gate    = gate_idx.get(ts)
+            s1s     = s1s_idx.get(ts)
+            s1m     = _get_latest_at_or_before(s1m_idx, ts)
+            s5m     = _get_latest_at_or_before(s5m_idx, ts)
+            det_rec = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
+
+            ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, baseline_1m)
+
+            errs = _validate_evidence(ev)
+            if errs:
+                print(f"[EV] EVIDENCE VALIDATION ERROR ts={ts}: {errs}", flush=True)
+                continue
+
+            _write_jsonl(ev_fh, ev)
+            n_ev += 1
+
+            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, baseline_1m,
+                               raw, state, se_fh)
+
+    print(f"[EV] Batch done: {n_ev} evidence records written "
+          f"({n_skip} no-trade bars skipped), "
+          f"{len(state.emitted_ids)} setups generated", flush=True)
+
+# ── Live mode ──────────────────────────────────────────────────────────────────────
+class LiveCtx:
+    """Shared state for live tasks."""
+    def __init__(self):
+        self.gate: dict[int, dict]  = {}
+        self.s1s:  dict[int, dict]  = {}
+        self.s1m:  dict[int, dict]  = {}
+        self.s5m:  dict[int, dict]  = {}
+        self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
+        self.baseline_1m: dict | None = None
+        self.setup_state = SetupState()
+
+async def _tail_secondary_file(
+    path: Path, cache: dict[int, dict],
+    label: str, ctx: LiveCtx = None, is_baseline: bool = False
+) -> None:
+    """Tail a secondary file and update cache or baseline."""
+    while not path.exists():
+        if HALT_FILE.exists():
+            return
+        await asyncio.sleep(1.0)
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if is_baseline:
+                    if rec.get("timeframe") == "1M" and ctx:
+                        ctx.baseline_1m = rec
+                else:
+                    ts = rec.get("window_start_ts")
+                    if ts is not None:
+                        cache[int(ts)] = rec
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        while True:
+            if HALT_FILE.exists():
+                return
+            line = f.readline()
+            if not line:
+                await asyncio.sleep(POLL_SLEEP)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if is_baseline:
+                    if rec.get("timeframe") == "1M" and ctx:
+                        ctx.baseline_1m = rec
+                else:
+                    ts = rec.get("window_start_ts")
+                    if ts is not None:
+                        cache[int(ts)] = rec
+            except (json.JSONDecodeError, Exception):
+                pass
+
+async def _primary_task(ctx: LiveCtx) -> None:
+    """Process primary file and write evidence + setups."""
+    while not PRIMARY_FILE.exists():
+        if HALT_FILE.exists():
+            return
+        await asyncio.sleep(1.0)
+
+    # Warm-up: skip existing records (process but don't write)
+    primary_existing = _read_all_jsonl(PRIMARY_FILE)
+    print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
+
+    with (open(EVIDENCE_FILE, "a", encoding="utf-8") as ev_fh,
+          open(SETUPS_FILE,   "a", encoding="utf-8") as se_fh,
+          open(PRIMARY_FILE,  "r", encoding="utf-8") as pf):
+
+        # Seek to end
+        pf.seek(0, 2)
+
+        while True:
+            if HALT_FILE.exists():
+                print("[EV] SYSTEM_HALT — stopping", flush=True)
+                return
+
+            line = pf.readline()
+            if not line:
+                await asyncio.sleep(POLL_SLEEP)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            cdna = raw.get("candle_dna") or {}
+            if not cdna.get("has_trade"):
+                continue
+
+            ts = raw.get("window_start_ts")
+            if ts is None:
+                continue
+            ts = int(ts)
+
+            gate    = ctx.gate.get(ts)
+            s1s     = ctx.s1s.get(ts)
+            s1m     = _get_latest_at_or_before(ctx.s1m, ts)
+            s5m     = _get_latest_at_or_before(ctx.s5m, ts)
+            det_rec = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
+
+            ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m)
+
+            errs = _validate_evidence(ev)
+            if errs:
+                print(f"[EV] VALIDATION ERROR ts={ts}: {errs}", flush=True)
+                continue
+
+            _write_jsonl(ev_fh, ev)
+            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m,
+                               raw, ctx.setup_state, se_fh)
+
+async def run_live() -> None:
+    ctx = LiveCtx()
+    tasks = [
+        asyncio.create_task(_primary_task(ctx), name="ev-primary"),
+        asyncio.create_task(_tail_secondary_file(GATE_FILE,     ctx.gate, "gate"), name="ev-gate"),
+        asyncio.create_task(_tail_secondary_file(STRUCT_1S_FILE, ctx.s1s, "s1s"), name="ev-s1s"),
+        asyncio.create_task(_tail_secondary_file(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="ev-s1m"),
+        asyncio.create_task(_tail_secondary_file(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="ev-s5m"),
+        asyncio.create_task(_tail_secondary_file(BASELINE_FILE,  {},      "bl",
+                                                 ctx=ctx, is_baseline=True),       name="ev-bl"),
+    ]
+    for det_name, path in DETECTOR_FILES.items():
+        tasks.append(asyncio.create_task(
+            _tail_secondary_file(path, ctx.dets[det_name], det_name),
+            name=f"ev-{det_name}"
+        ))
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        print("[EV] Tasks cancelled", flush=True)
+
+# ── Entry point ────────────────────────────────────────────────────────────────────
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evidence Engine — Layer 7")
+    parser.add_argument("--mode", choices=["batch", "live"], default="live")
+    args = parser.parse_args()
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if HALT_FILE.exists():
+        print("[EV] SYSTEM_HALT exists at startup — refusing to start", flush=True)
+        sys.exit(1)
+
+    if args.mode == "batch":
+        run_batch()
+    else:
+        print("[EV] Starting live mode", flush=True)
+        asyncio.run(run_live())
+
+if __name__ == "__main__":
+    main()
