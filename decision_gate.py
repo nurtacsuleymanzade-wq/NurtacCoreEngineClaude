@@ -206,13 +206,14 @@ def _compute_gate(ts: int, window_end_ts: int,
 
     confluence_score = aligned_count
 
-    # Strong bonus
+    # Strong bonus — only for non-neutral dominant direction
     strong_bonus = 0.0
-    for det in DETECTORS:
-        s = summary[det]
-        if s["direction_class"] == dominant_direction:
-            if s["label"].endswith("_strong"):
-                strong_bonus += 0.5
+    if dominant_direction != "neutral":
+        for det in DETECTORS:
+            s = summary[det]
+            if s["direction_class"] == dominant_direction:
+                if s["label"].endswith("_strong"):
+                    strong_bonus += 0.5
 
     quality_score = float(confluence_score) + strong_bonus
 
