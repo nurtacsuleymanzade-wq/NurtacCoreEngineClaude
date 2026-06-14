@@ -8,9 +8,11 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 |---|---|---|
 | Layer-0 | `main.py` | Live WebSocket → 1S DNA (Candle, Footprint, Depth, Combined) |
 | Layer-1 | `rolling_window_engine.py` | Combined 1S → Rolling 3S / 5S / 15S DNA |
-| Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
 | Layer-2 | `aligned_candle_engine.py` | Combined 1S → Aligned 1M / 5M / 15M / 1H / 4H / 1D DNA |
 | Layer-3 | `historical_baseline_engine.py` | All DNA files → ATR / VWAP / CVD / Percentile baseline |
+| Layer-4 | `detector_engine.py` | 6 parallel detectors → Absorption / Sweep / Exhaustion / Iceberg / Trapped Trader / Initiative Flow labels |
+| Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
+| Layer-6 | `smart_money_engine.py` | 5 timeframes → Market structure (Swings / BOS / CHoCH / MSB / OB / FVG) |
 
 ## Layer-0 Output Files
 
@@ -47,6 +49,38 @@ All three engines write anomaly and status events to:
 | File | Description |
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
+## Layer-6 Smart Money Engine
+
+Reads Layer-0/2/3 JSONL outputs (1S candles, aligned OHLC, baseline ATR) and
+runs 5 independent timeframe processors (1S, 1M, 5M, 15M, 1H) in parallel.
+Produces market structure analysis — no signals, no trade decisions.
+
+| Output | File |
+|---|---|
+| 1S Structure | `data/structure_1s.jsonl` |
+| 1M Structure | `data/structure_1m.jsonl` |
+| 5M Structure | `data/structure_5m.jsonl` |
+| 15M Structure | `data/structure_15m.jsonl` |
+| 1H Structure | `data/structure_1h.jsonl` |
+
+```bash
+# Batch: process all existing data, write last record per timeframe
+python3 smart_money_engine.py --mode batch
+
+# Live: warm-up from existing data, then tail-follow all 5 input files
+python3 smart_money_engine.py --mode live
+
+# Full output (print every bar)
+FULL_PRINT=true python3 smart_money_engine.py --mode live
+```
+
+**Structure labels per timeframe:** Swing High/Low (HH/HL/LH/LL/EQH/EQL) ·
+Trend (uptrend/downtrend/ranging/unknown + strong/weak/unclear) ·
+BOS (micro for 1S, macro for 1M+) · CHoCH Phase 1/2 · MSB ·
+Order Blocks (max 3, status: active/mitigated/breaker) ·
+Fair Value Gaps (max 5, status: active/mitigated/filled) ·
+Equal High/Low levels
 
 ## Layer-5 Decision Gate
 
