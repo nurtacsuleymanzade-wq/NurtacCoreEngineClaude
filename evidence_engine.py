@@ -35,6 +35,7 @@ POLL_SLEEP = 0.05
 EVIDENCE_FILE   = DATA_DIR / "evidence_stream.jsonl"
 SETUPS_FILE     = DATA_DIR / "setups.jsonl"
 BIAS_CTX_FILE   = DATA_DIR / "bias_context.jsonl"
+VOL_PROFILE_1M  = DATA_DIR / "volume_profile_1m.jsonl"
 
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
@@ -90,6 +91,22 @@ def _read_all_jsonl(path: Path) -> list[dict]:
     except OSError:
         pass
     return records
+
+def _read_vol_profile_1m() -> dict | None:
+    """Read last line of volume_profile_1m.jsonl."""
+    if not VOL_PROFILE_1M.exists():
+        return None
+    try:
+        last_line = ""
+        with open(VOL_PROFILE_1M, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if not last_line:
+            return None
+        return json.loads(last_line)
+    except Exception:
+        return None
 
 def _read_bias_context() -> tuple[str, float]:
     """Read last line of bias_context.jsonl. Returns (dominant_bias, bias_gap)."""
@@ -427,6 +444,47 @@ def compute_evidence(
         "long_contribution":  mc_long,
         "short_contribution": mc_short,
     }
+
+    # ── G. Volume Profile Bias ────────────────────────────────────────────────
+    vp_rec = _read_vol_profile_1m()
+    vp_long  = 0.0
+    vp_short = 0.0
+    vp_comp: dict = {"available": vp_rec is not None}
+    if vp_rec:
+        bh  = vp_rec.get("bias_hint") or {}
+        ms  = vp_rec.get("market_state") or {}
+        fa  = ms.get("failed_auction") or {}
+        loc_bias   = bh.get("location_bias", "neutral")
+        shape_bias = bh.get("shape_bias", "neutral")
+        state_bias = bh.get("state_bias", "neutral")
+        if loc_bias == "long":
+            vp_long  += 1.5
+        elif loc_bias == "short":
+            vp_short += 1.5
+        if shape_bias == "long":
+            vp_long  += 1.0
+        elif shape_bias == "short":
+            vp_short += 1.0
+        if state_bias == "long":
+            vp_long  += 1.0
+        elif state_bias == "short":
+            vp_short += 1.0
+        if fa.get("detected"):
+            fa_dir = fa.get("direction", "")
+            if fa_dir == "failed_auction_above":
+                vp_short += 2.0
+            elif fa_dir == "failed_auction_below":
+                vp_long  += 2.0
+        vp_comp["location_bias"]  = loc_bias
+        vp_comp["shape_bias"]     = shape_bias
+        vp_comp["state_bias"]     = state_bias
+        vp_comp["failed_auction"] = fa.get("direction") if fa.get("detected") else None
+        vp_comp["long_contribution"]  = vp_long
+        vp_comp["short_contribution"] = vp_short
+
+    long_score  += vp_long
+    short_score += vp_short
+    comps["volume_profile_bias"] = vp_comp
 
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)

@@ -1,0 +1,13 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-8 Volume Profile Engine
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 volume_profile_engine.py --mode live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
