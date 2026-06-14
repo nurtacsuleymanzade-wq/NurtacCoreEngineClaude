@@ -47,6 +47,31 @@ All three engines write anomaly and status events to:
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
 
+## Layer-4 Detector Engine
+
+Reads Layer-0/1/2/3 JSONL outputs and runs 6 parallel detectors, each producing
+labels only. No Binance API calls. No mock data. No signals or trade decisions.
+
+| Detector | Output File |
+|---|---|
+| Absorption | `data/labels_absorption.jsonl` |
+| Sweep | `data/labels_sweep.jsonl` |
+| Exhaustion | `data/labels_exhaustion.jsonl` |
+| Iceberg | `data/labels_iceberg.jsonl` |
+| Trapped Trader | `data/labels_trapped_trader.jsonl` |
+| Initiative Flow | `data/labels_initiative_flow.jsonl` |
+
+```bash
+# Batch: process all existing data, write last label per detector
+python3 detector_engine.py --mode batch
+
+# Live: batch warm-up then continuous tail-follow
+python3 detector_engine.py --mode live
+
+# Full JSON output (all labels including none)
+FULL_PRINT=true python3 detector_engine.py --mode live
+```
+
 ## Layer-3 Historical Baseline + Context Metrics Engine
 
 Reads all Layer-0/1/2 JSONL DNA files (no Binance API calls) and produces
