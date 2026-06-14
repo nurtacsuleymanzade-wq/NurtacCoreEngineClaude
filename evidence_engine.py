@@ -32,8 +32,9 @@ HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 FULL_PRINT = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_SLEEP = 0.05
 
-EVIDENCE_FILE = DATA_DIR / "evidence_stream.jsonl"
-SETUPS_FILE   = DATA_DIR / "setups.jsonl"
+EVIDENCE_FILE   = DATA_DIR / "evidence_stream.jsonl"
+SETUPS_FILE     = DATA_DIR / "setups.jsonl"
+BIAS_CTX_FILE   = DATA_DIR / "bias_context.jsonl"
 
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
@@ -89,6 +90,25 @@ def _read_all_jsonl(path: Path) -> list[dict]:
     except OSError:
         pass
     return records
+
+def _read_bias_context() -> tuple[str, float]:
+    """Read last line of bias_context.jsonl. Returns (dominant_bias, bias_gap)."""
+    if not BIAS_CTX_FILE.exists():
+        return "neutral", 0.0
+    try:
+        last_line = ""
+        with open(BIAS_CTX_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if not last_line:
+            return "neutral", 0.0
+        rec = json.loads(last_line)
+        dom = rec.get("dominant_bias", "neutral")
+        gap = float(rec.get("bias_gap", 0.0))
+        return dom, gap
+    except Exception:
+        return "neutral", 0.0
 
 def _build_exact_index(records: list[dict]) -> dict[int, dict]:
     """Index records by window_start_ts. Latest record wins on duplicate ts."""
@@ -390,6 +410,23 @@ def compute_evidence(
     if bl_comp["atr_extreme_high"]:
         long_score  *= 0.85
         short_score *= 0.85
+
+    # ── F. Market Context Bias ────────────────────────────────────────────────────
+    bias_dom, bias_gap_val = _read_bias_context()
+    mc_long  = 0.0
+    mc_short = 0.0
+    if bias_dom == "long":
+        mc_long = 2.0 if bias_gap_val >= 2.0 else 1.0
+    elif bias_dom == "short":
+        mc_short = 2.0 if bias_gap_val >= 2.0 else 1.0
+    long_score  += mc_long
+    short_score += mc_short
+    comps["market_context_bias"] = {
+        "dominant_bias":  bias_dom,
+        "bias_gap":       round(bias_gap_val, 4),
+        "long_contribution":  mc_long,
+        "short_contribution": mc_short,
+    }
 
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)

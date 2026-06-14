@@ -13,7 +13,8 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-4 | `detector_engine.py` | 6 parallel detectors → Absorption / Sweep / Exhaustion / Iceberg / Trapped Trader / Initiative Flow labels |
 | Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
 | Layer-6 | `smart_money_engine.py` | 5 timeframes → Market structure (Swings / BOS / CHoCH / MSB / OB / FVG) |
-| Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline) → Evidence stream + Setup generator |
+| Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline/market_context) → Evidence stream + Setup generator |
+| Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
 
@@ -50,6 +51,33 @@ All three engines write anomaly and status events to:
 | File | Description |
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
+## Market Context Engine
+
+Polls Binance Public REST APIs (no API key) and the liquidation WebSocket to
+produce macro bias context. Updates every 30s (OI) and 5m (funding/L/S/taker).
+
+| Output | File |
+|---|---|
+| Market metrics snapshot | `data/market_context.jsonl` |
+| Liquidation events | `data/liquidation_events.jsonl` |
+| Liquidation heatmap | `data/liquidation_heatmap.jsonl` |
+| Bias context | `data/bias_context.jsonl` |
+
+```bash
+python3 market_context_engine.py --mode batch
+python3 market_context_engine.py --mode live
+FULL_PRINT=true python3 market_context_engine.py --mode live
+```
+
+**Sources:** OI change vs price direction · Funding rate (contrarian) ·
+Global L/S ratio (contrarian) · Top Trader L/S ratio (follow) ·
+Taker buy/sell (from klines) · Futures delta alignment ·
+Liquidation stream cascade detection · Liquidation heatmap max pain
+
+**Bias integration in Layer-7:** `evidence_engine.py` reads the latest
+`bias_context.jsonl` record; `dominant_bias=="long"` adds +1.0/+2.0 to
+`long_score`; `dominant_bias=="short"` adds to `short_score`.
 
 ## Layer-7 Evidence Accumulator + Setup Generator
 
