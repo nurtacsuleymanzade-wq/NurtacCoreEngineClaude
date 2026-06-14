@@ -8,6 +8,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 |---|---|---|
 | Layer-0 | `main.py` | Live WebSocket → 1S DNA (Candle, Footprint, Depth, Combined) |
 | Layer-1 | `rolling_window_engine.py` | Combined 1S → Rolling 3S / 5S / 15S DNA |
+| Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
 | Layer-2 | `aligned_candle_engine.py` | Combined 1S → Aligned 1M / 5M / 15M / 1H / 4H / 1D DNA |
 | Layer-3 | `historical_baseline_engine.py` | All DNA files → ATR / VWAP / CVD / Percentile baseline |
 
@@ -46,6 +47,30 @@ All three engines write anomaly and status events to:
 | File | Description |
 |---|---|
 | `data/data_quality_log.jsonl` | Stream disconnects, reconnects, late events, anomalies, gaps, validation failures |
+
+## Layer-5 Decision Gate
+
+Reads all 6 Layer-4 detector label files, groups labels by `window_start_ts`,
+and classifies each window into a setup grade (A/B/C/none) based on how many
+detectors fire in the same direction. No signals or trade decisions — setup
+classification only.
+
+| Output | File |
+|---|---|
+| Gate Decisions | `data/decision_gate_output.jsonl` |
+
+```bash
+# Batch: process all existing label data
+python3 decision_gate.py --mode batch
+
+# Live: tail all 6 label files, settle 2s per window, then emit
+python3 decision_gate.py --mode live
+
+# Full JSON output (including grade=none windows)
+FULL_PRINT=true python3 decision_gate.py --mode live
+```
+
+**Setup grades:** A (quality≥4.0, confluence≥3) · B (quality≥2.5, confluence≥2) · C (quality≥1.5, confluence≥1)
 
 ## Layer-4 Detector Engine
 

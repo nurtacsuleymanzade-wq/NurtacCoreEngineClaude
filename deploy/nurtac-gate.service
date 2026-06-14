@@ -1,0 +1,13 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-5 Decision Gate
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 decision_gate.py --mode live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
