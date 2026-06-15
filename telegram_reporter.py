@@ -402,19 +402,23 @@ def format_gate_a(row: dict) -> str:
     qual = _sf(row.get("quality_score"), 0.0)
     ctx_align = row.get("context_alignment", "unknown")
 
-    # Detector summary
-    dets = []
-    for det in ["absorption", "sweep", "exhaustion", "initiative_flow", "trapped_trader", "iceberg"]:
-        lbl = row.get(f"{det}_label")
-        if lbl and lbl != "none":
-            dets.append(f"{det}:{lbl[:1].upper()}")
-    det_line = " | ".join(dets) if dets else "none"
+    # Detector summary from detector_summary field
+    active_detectors = []
+    for det_name, det_data in row.get("detector_summary", {}).items():
+        if det_data.get("label") != "none":
+            label = det_data.get("label", "")
+            active_detectors.append(f"{det_name}:{label}")
+
+    if active_detectors:
+        detector_line = " + ".join(active_detectors)
+    else:
+        detector_line = "detectors: none"
 
     return f"""<b>🏆 GATE A SETUP</b>
 ━━━━━━━━━━━━━━━━━━━
 <b>{dom_dir}</b> | Confluence: {conf:.1f}
 Quality: {qual:.1f}
-{det_line}
+Detectors: {detector_line}
 📊 Context: {ctx_align}
 ⏱️ {ts_h}"""
 
@@ -469,6 +473,12 @@ def format_hourly_summary(state: ReporterState) -> str:
     # Format price: show N/A if not available
     price_str = f"{state.current_price:.2f}" if state.current_price and state.current_price > 0 else "N/A"
 
+    # Format max loss: show N/A if no trades, otherwise show signed number
+    if trades == 0:
+        max_loss_str = "N/A"
+    else:
+        max_loss_str = f"{max_loss:+.2f}R"
+
     return f"""<b>📊 SAATLIK ÖZET</b>
 ━━━━━━━━━━━━━━━━━━━
 ⏰ {hour:02d}:00 UTC
@@ -480,7 +490,7 @@ def format_hourly_summary(state: ReporterState) -> str:
   Profit Factor: {pf}
 
 🏆 <b>En İyi:</b> +{max_win:.2f}R
-💸 <b>En Kötü:</b> {max_loss:.2f}R
+💸 <b>En Kötü:</b> {max_loss_str}
 
 📚 <b>Öğrenme:</b>
   Tamamlanan: {completed_obs}
@@ -713,6 +723,14 @@ async def on_quality_log(row: dict, state: ReporterState) -> None:
     evt_type = row.get("event_type", "")
     if evt_type not in ("stream_disconnected", "gap_detected"):
         return
+
+    # Skip small gaps (< 5 seconds) — they're normal
+    if evt_type == "gap_detected":
+        detail = row.get("detail") or {}
+        gap_seconds = detail.get("gap_seconds", 0)
+        if isinstance(gap_seconds, (int, float)) and gap_seconds < 5:
+            return  # Small gaps are noise, skip them
+
     ts = row.get("ts", 0)
     if state.mq.has_processed(f"quality_{ts}"):
         return
