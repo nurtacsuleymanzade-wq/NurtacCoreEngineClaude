@@ -17,6 +17,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-9 | `scenario_engine.py` | 9 scenario detectors → Market behavior pattern recognition (Scenario stream + Memory) |
 | Layer-10 | `observer_engine.py` | Observes L7 setups, runs state machines per setup, qualifies via 7 transition events → Observations + Qualified setups |
 | Layer-11 | `historical_outcome_engine.py` | Normalizes events from all signal sources, opens forward-horizon observations, measures outcomes, writes calibration profiles — no scoring |
+| Layer-12 | `paper_trade_engine.py` | Reads Layer-10 qualified setups, simulates paper trades against live 1S price feed, tracks TP1/TP2/TP3/SL milestones, writes per-trade records and cumulative stats |
 | Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
@@ -113,6 +114,41 @@ location valid · scenario direction aligned · bias aligned
 **Timeouts:** WAITING 60s · DEVELOPING 120s · global lifetime 300s
 
 **Max concurrent setups:** 10 (oldest expires if exceeded)
+
+## Layer-12 Paper Trade Lifecycle Engine
+
+Reads qualified setups from Layer-10, simulates paper trades against the live 1S price feed,
+tracks TP1/TP2/TP3 milestones and SL, applies breakeven stop mechanics, and computes PnL.
+No real orders. No real money. No Binance API.
+
+| Output | File |
+|---|---|
+| Closed trades (append) | `data/paper_trades.jsonl` |
+| Open trades snapshot | `data/paper_trades_open.json` |
+| Cumulative summary | `data/paper_trade_summary.json` |
+| Health snapshot | `data/paper_trade_health.json` |
+
+```bash
+python3 paper_trade_engine.py --mode batch
+python3 paper_trade_engine.py --mode live
+FULL_PRINT=true python3 paper_trade_engine.py --mode live
+```
+
+**Trade lifecycle:** Open → TP1 hit (stop→breakeven) → TP2 hit → TP3 hit (WIN) or SL hit (LOSS) or breakeven stop (BREAKEVEN) or timeout
+
+**Close reasons:** `sl_hit` · `tp3_hit` · `breakeven_stop` · `timeout`
+
+**Outcomes:** `win` · `loss` · `breakeven` · `timeout_win` · `timeout_loss` · `timeout_flat`
+
+**Timeouts:** flash/1S=300bars · 1M=1800bars · 5M=5400bars · default=900bars
+
+**Max concurrent trades:** 3
+
+**Summary breakdowns:** by_direction · by_setup_type · by_timeframe · by_scenario · by_gate_grade · by_close_reason
+
+**PnL metrics:** pnl_r (R-multiples) · pnl_pct · max_favorable_r · max_adverse_r · profit_factor · consecutive win/loss streaks
+
+**Restart recovery:** Reads closed trades from `paper_trades.jsonl` to rebuild processed setup IDs; never re-opens an already-processed setup.
 
 ## Layer-11 Historical Outcome Engine
 
