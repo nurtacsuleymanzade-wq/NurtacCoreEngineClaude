@@ -16,6 +16,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline/market_context/scenario) → Evidence stream + Setup generator |
 | Layer-9 | `scenario_engine.py` | 9 scenario detectors → Market behavior pattern recognition (Scenario stream + Memory) |
 | Layer-10 | `observer_engine.py` | Observes L7 setups, runs state machines per setup, qualifies via 7 transition events → Observations + Qualified setups |
+| Layer-11 | `historical_outcome_engine.py` | Normalizes events from all signal sources, opens forward-horizon observations, measures outcomes, writes calibration profiles — no scoring |
 | Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
@@ -112,6 +113,43 @@ location valid · scenario direction aligned · bias aligned
 **Timeouts:** WAITING 60s · DEVELOPING 120s · global lifetime 300s
 
 **Max concurrent setups:** 10 (oldest expires if exceeded)
+
+## Layer-11 Historical Outcome Engine
+
+Reads all signal sources (6 detectors, evidence, 3 structure files, scenarios, observer),
+opens a forward-horizon observation per qualifying event, then measures what actually happened
+at 30s / 60s / 180s / 300s / 900s / 3600s. Writes calibration profiles grouped by pattern.
+No scoring, no confidence, no thresholds, no signals.
+
+| Output | File |
+|---|---|
+| Completed observations | `data/historical_outcome_observations.jsonl` |
+| Open positions (for restart) | `data/historical_outcome_open_positions.json` |
+| Calibration profiles | `data/calibration_profiles.json` |
+| Health snapshot | `data/historical_outcome_health.json` |
+| Errors | `data/historical_outcome_errors.jsonl` |
+
+```bash
+python3 historical_outcome_engine.py --mode batch
+python3 historical_outcome_engine.py --mode live
+FULL_PRINT=true python3 historical_outcome_engine.py --mode live
+```
+
+**Event sources:** 6 detector label files · evidence stream · structure 1S/1M/5M · scenarios · observer qualified setups (optional)
+
+**Horizons:** 30s · 60s · 180s · 300s · 900s · 3600s
+
+**Per observation:** observation_id · event_id · pattern_signature · reference price (at or before event_ts) · outcomes per horizon (raw_return / side_adjusted_return / directional_result / max_favorable / max_adverse) · validation block
+
+**Composite patterns:** events at the same window_start_ts (±2000ms) from different sources form a composite observation in addition to individual ones.
+
+**Calibration profiles:** grouped by (symbol, timeframe, source, event_type, side, direction, pattern_signature). All `scores` fields are `null`. `calibration_status` is always `"observed_not_scored"`.
+
+**Future leakage prevention:** `reference_price_ts <= event_window_start_ts` enforced; any violation logged and observation skipped.
+
+**Restart recovery:** open observations persist to `historical_outcome_open_positions.json` every 30s and are restored on startup.
+
+**Max open observations:** 500 (oldest force-closed if exceeded). Observation timeout: event_ts + 3600s.
 
 ## Layer-9 Scenario Engine
 
