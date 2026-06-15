@@ -97,13 +97,27 @@ async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) 
             # Call function (may be sync or async)
             if asyncio.iscoroutinefunction(func):
                 await func()
+                print(f"[SUPERVISOR] ✓ {module_name}.{func_name} normal olarak sonlandı", flush=True)
+                break  # Exit after successful completion
             else:
-                # Sync function — run in thread pool to avoid blocking event loop
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, func)
-
-            print(f"[SUPERVISOR] ✓ {module_name}.{func_name} normal olarak sonlandı", flush=True)
-            break  # Exit after successful completion
+                # Sync function — detect if it's "main" (runs forever)
+                if func_name == "main":
+                    # main() functions typically run forever in live mode
+                    # Run them in background thread, don't wait
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, func)
+                    print(f"[SUPERVISOR] ▶ {module_name}.{func_name} arka plan thread'inde başlatıldı (sonsuz loop)", flush=True)
+                    # Keep the thread running until SYSTEM_HALT or crash
+                    while not HALT_FILE.exists():
+                        await asyncio.sleep(5)
+                    print(f"[SUPERVISOR] ✓ {module_name}.{func_name} SYSTEM_HALT ile sonlandırıldı", flush=True)
+                    break
+                else:
+                    # Other sync functions — wait for completion
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, func)
+                    print(f"[SUPERVISOR] ✓ {module_name}.{func_name} normal olarak sonlandı", flush=True)
+                    break
 
         except asyncio.CancelledError:
             print(f"[SUPERVISOR] ⊘ {module_name} iptal edildi", flush=True)
