@@ -13,7 +13,8 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-4 | `detector_engine.py` | 6 parallel detectors → Absorption / Sweep / Exhaustion / Iceberg / Trapped Trader / Initiative Flow labels |
 | Layer-5 | `decision_gate.py` | Layer-4 labels → Setup grade (A/B/C) + confluence scoring |
 | Layer-6 | `smart_money_engine.py` | 5 timeframes → Market structure (Swings / BOS / CHoCH / MSB / OB / FVG) |
-| Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline/market_context) → Evidence stream + Setup generator |
+| Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline/market_context/scenario) → Evidence stream + Setup generator |
+| Layer-9 | `scenario_engine.py` | 9 scenario detectors → Market behavior pattern recognition (Scenario stream + Memory) |
 | Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
@@ -78,6 +79,38 @@ Liquidation stream cascade detection · Liquidation heatmap max pain
 **Bias integration in Layer-7:** `evidence_engine.py` reads the latest
 `bias_context.jsonl` record; `dominant_bias=="long"` adds +1.0/+2.0 to
 `long_score`; `dominant_bias=="short"` adds to `short_score`.
+
+## Layer-9 Scenario Engine
+
+Reads all lower-layer JSONL outputs; triggered by each new 1S bar with `has_trade=true`.
+Evaluates 9 market behavior scenarios simultaneously. No signals, no orders — scenario
+detection and market question answers only.
+
+| Output | File |
+|---|---|
+| Scenario stream | `data/scenarios.jsonl` |
+| Scenario memory | `data/scenario_memory.jsonl` |
+
+```bash
+python3 scenario_engine.py --mode batch
+python3 scenario_engine.py --mode live
+FULL_PRINT=true python3 scenario_engine.py --mode live
+```
+
+**Scenarios:** S1 Long Trap · S2 Short Trap · S3 Institutional Accumulation ·
+S4 Failed Auction · S5 Breakout Continuation · S6 Exhaustion Reversal ·
+S7 Reclaim · S8 Liquidity Sweep · S9 Balance→Breakout Anticipation
+
+**Per-scenario output:** score/max_score · status (confirmed/developing) ·
+direction (bullish/bearish/neutral) · 5 condition flags · 9 market questions
+(location/aggression/absorption/exhaustion/trap/acceptance/continuation/invalidation/target)
+
+**Scenario memory:** Last 100 confirmed scenarios stored in `data/scenario_memory.jsonl`
+for future Edge Matrix and Paper Trade Lifecycle analytics.
+
+**Evidence integration (Section H):** `evidence_engine.py` reads `scenarios.jsonl`
+and adds up to +3.0 (confirmed) or +1.5 (developing) to long/short score based on
+dominant scenario direction, plus +1.0 multi-scenario alignment bonus.
 
 ## Layer-7 Evidence Accumulator + Setup Generator
 

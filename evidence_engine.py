@@ -486,6 +486,66 @@ def compute_evidence(
     short_score += vp_short
     comps["volume_profile_bias"] = vp_comp
 
+    # ── H. Scenario Bias ──────────────────────────────────────────────────────
+    sc_long  = 0.0
+    sc_short = 0.0
+    sc_comp: dict = {"available": False}
+    _sc_file = DATA_DIR / "scenarios.jsonl"
+    if _sc_file.exists():
+        try:
+            _sc_last = ""
+            with open(_sc_file, "r", encoding="utf-8") as _scf:
+                for _scl in _scf:
+                    if _scl.strip():
+                        _sc_last = _scl.strip()
+            if _sc_last:
+                _sc_rec = json.loads(_sc_last)
+                _dom    = _sc_rec.get("dominant_scenario")
+                _dom_dir = _sc_rec.get("dominant_direction", "neutral")
+                _active = _sc_rec.get("active_scenarios") or []
+                sc_comp["available"] = True
+                sc_comp["dominant_scenario"] = _dom
+                sc_comp["dominant_direction"] = _dom_dir
+
+                # dominant_scenario confirmed
+                _confirmed = [s for s in _active if s.get("status") == "confirmed"]
+                _dom_status = None
+                for _s in _active:
+                    if _s.get("scenario_name") == _dom:
+                        _dom_status = _s.get("status")
+                        break
+
+                if _dom and _dom_status == "confirmed":
+                    if _dom_dir == "bullish":
+                        sc_long  += 3.0
+                    elif _dom_dir == "bearish":
+                        sc_short += 3.0
+                elif _dom and _dom_status == "developing":
+                    if _dom_dir == "bullish":
+                        sc_long  += 1.5
+                    elif _dom_dir == "bearish":
+                        sc_short += 1.5
+
+                # multi-scenario alignment bonus
+                if len(_confirmed) >= 2:
+                    _conf_dirs = {s.get("direction") for s in _confirmed
+                                  if s.get("direction") not in (None, "neutral")}
+                    if len(_conf_dirs) == 1:
+                        _aligned_dir = next(iter(_conf_dirs))
+                        if _aligned_dir == "bullish":
+                            sc_long  += 1.0
+                        elif _aligned_dir == "bearish":
+                            sc_short += 1.0
+
+                sc_comp["long_contribution"]  = sc_long
+                sc_comp["short_contribution"] = sc_short
+        except Exception:
+            pass
+
+    long_score  += sc_long
+    short_score += sc_short
+    comps["scenario_bias"] = sc_comp
+
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
     short_score = max(0.0, short_score)

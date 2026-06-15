@@ -1,0 +1,13 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-9 Scenario Engine
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 scenario_engine.py --mode live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
