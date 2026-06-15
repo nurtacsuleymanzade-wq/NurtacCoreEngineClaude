@@ -76,7 +76,7 @@ def ts_to_human(ms: int | None) -> str:
     if ms is None:
         return "unknown"
     try:
-        dt = datetime.datetime.utcfromtimestamp(ms / 1000)
+        dt = datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc).replace(tzinfo=None)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return "invalid_ts"
@@ -428,8 +428,8 @@ Yön: <b>{dom_dir}</b> | Score: {score:.0f}/{max_score:.0f}
 ⏱️ {ts_h}"""
 
 def format_hourly_summary(state: ReporterState) -> str:
-    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    hour = now.hour
+    dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    hour = dt.hour
     summary_data = _read_json(SUMMARY_FILE) or {}
     total_data = summary_data.get("total", {})
 
@@ -767,7 +767,7 @@ async def _periodic(state: ReporterState) -> None:
             last_health = now
 
         # Hourly summary
-        dt_now = datetime.datetime.utcnow()
+        dt_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         if dt_now.hour != state.last_hourly_hour:
             text = format_hourly_summary(state)
             await state.mq.enqueue("hourly_summary", text)
