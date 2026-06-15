@@ -18,6 +18,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-10 | `observer_engine.py` | Observes L7 setups, runs state machines per setup, qualifies via 7 transition events → Observations + Qualified setups |
 | Layer-11 | `historical_outcome_engine.py` | Normalizes events from all signal sources, opens forward-horizon observations, measures outcomes, writes calibration profiles — no scoring |
 | Layer-12 | `paper_trade_engine.py` | Reads Layer-10 qualified setups, simulates paper trades against live 1S price feed, tracks TP1/TP2/TP3/SL milestones, writes per-trade records and cumulative stats |
+| Layer-13 | `telegram_reporter.py` | Monitors all signal/trade/system events from lower layers, sends curated Telegram reports with rate limiting and graceful fallback to terminal |
 | Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
@@ -114,6 +115,46 @@ location valid · scenario direction aligned · bias aligned
 **Timeouts:** WAITING 60s · DEVELOPING 120s · global lifetime 300s
 
 **Max concurrent setups:** 10 (oldest expires if exceeded)
+
+## Layer-13 Telegram Reporter
+
+Monitors all signal, trade, structural, and system events across lower layers.
+Sends curated Telegram messages with rate limiting, retry logic, and cooldowns.
+If TELEGRAM_BOT_TOKEN/CHAT_ID not configured, messages print to terminal instead.
+
+| Output | File |
+|---|---|
+| Message log (append) | `data/telegram_log.jsonl` |
+| Health snapshot | `data/telegram_health.json` |
+
+```bash
+python3 telegram_reporter.py --mode batch
+python3 telegram_reporter.py --mode live
+```
+
+**Configuration:**
+```bash
+export TELEGRAM_BOT_TOKEN=your_bot_token
+export TELEGRAM_CHAT_ID=your_chat_id
+```
+
+Or create `.env` file (excluded from git):
+```
+TELEGRAM_BOT_TOKEN=xxx
+TELEGRAM_CHAT_ID=yyy
+```
+
+**Message types:** Setup opened · Trade close (WIN/LOSS/BREAKEVEN) · Structural events (1M CHoCH/MSB/macro BOS) · Gate A setup · Scenario change · Hourly summary · Daily summary · System halt · Watchdog alarm · Validator alert
+
+**Rate limiting:** 1 msg/sec, queue max 50, retry 3x (2s/4s/8s)
+
+**Cooldowns:** Structure 5min · Gate A 30s · Scenario 3min · Watchdog 5min · Validator 5min
+
+**Message queue:** Async, per-message type cooldown tracking, automatic oldest removal on overflow
+
+**Fallback:** If Telegram not configured, all formatted messages print to terminal with `[TELEGRAM] NOT CONFIGURED` prefix — program continues normally
+
+**Restart recovery:** Reads `telegram_log.jsonl` to rebuild processed event IDs on startup
 
 ## Layer-12 Paper Trade Lifecycle Engine
 

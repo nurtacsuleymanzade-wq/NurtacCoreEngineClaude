@@ -1,0 +1,14 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-13 Telegram Reporter
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+EnvironmentFile=/root/NurtacCoreEngineClaude/.env
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 telegram_reporter.py --mode live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

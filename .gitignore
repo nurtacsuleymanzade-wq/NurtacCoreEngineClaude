@@ -4,3 +4,4 @@ data/*.jsonl
 *.pyc
 *.pyo
 .DS_Store
+.env
