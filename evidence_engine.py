@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -88,6 +89,27 @@ def _read_all_jsonl(path: Path) -> list[dict]:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+    except OSError:
+        pass
+    return records
+
+def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
+    """Read only last N lines from JSONL file (memory-efficient warm-up)."""
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            last_records = deque(maxlen=maxlen)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            records = list(last_records)
     except OSError:
         pass
     return records
@@ -1041,7 +1063,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     # Warm-up: skip existing records (process but don't write)
-    primary_existing = _read_all_jsonl(PRIMARY_FILE)
+    primary_existing = _read_last_n_jsonl(PRIMARY_FILE, 3600)
     print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
 
     with (open(EVIDENCE_FILE, "a", encoding="utf-8") as ev_fh,

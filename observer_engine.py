@@ -1062,7 +1062,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             return
         await asyncio.sleep(1.0)
 
-    existing = _read_all_jsonl(PRIMARY_FILE)
+    existing = _read_last_n_jsonl(PRIMARY_FILE, 3600)
     print(f"[OBS] Warm-up: {len(existing)} existing primary records", flush=True)
 
     with (open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh,
