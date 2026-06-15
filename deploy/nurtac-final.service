@@ -1,0 +1,13 @@
+[Unit]
+Description=NurtacCoreEngineClaude Layer-15 Final Setup Engine
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 final_setup_engine.py --mode live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
