@@ -80,7 +80,7 @@ def _check_system_halt() -> None:
         except Exception:
             reason = "unknown"
         print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
-        sys.exit(1)
+        return
 
 
 # ── Data quality log ──────────────────────────────────────────────────────────

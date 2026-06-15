@@ -1297,7 +1297,7 @@ async def run_live() -> None:
 def main() -> None:
     if HALT_FILE.exists():
         print("[VP] SYSTEM_HALT exists at startup — refusing to start", flush=True)
-        sys.exit(1)
+        return
 
     parser = argparse.ArgumentParser(description="Volume Profile Engine — Layer 8")
     parser.add_argument("--mode", choices=["batch", "live"], default="live")

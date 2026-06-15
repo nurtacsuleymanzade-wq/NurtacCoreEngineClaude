@@ -937,7 +937,7 @@ def main() -> None:
 
     if HALT_FILE.exists():
         print("[SME] SYSTEM_HALT exists at startup — refusing to start", flush=True)
-        sys.exit(1)
+        return
 
     baselines = _load_baselines()
     print(f"[SME] Loaded baselines: {baselines}", flush=True)

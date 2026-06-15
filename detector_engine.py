@@ -75,7 +75,7 @@ _buf_15s: deque[dict] = deque(maxlen=10)
 def _check_halt() -> None:
     if HALT_FILE.exists():
         print("SYSTEM_HALT: detector_engine durduruluyor")
-        sys.exit(1)
+        return
 
 
 def _safe_float(val, default: float = 0.0) -> float:

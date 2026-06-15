@@ -66,7 +66,7 @@ _baseline_1m: dict | None = None
 def _check_halt() -> None:
     if HALT_FILE.exists():
         print("SYSTEM_HALT: decision_gate durduruluyor")
-        sys.exit(1)
+        return
 
 
 def _safe_float(val, default: float = 0.0) -> float:

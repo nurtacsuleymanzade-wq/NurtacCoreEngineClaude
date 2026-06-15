@@ -801,7 +801,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if HALT_FILE.exists():
         print("[MCE] SYSTEM_HALT at startup — refusing to start", flush=True)
-        sys.exit(1)
+        return
 
     if args.mode == "batch":
         run_batch()

@@ -850,7 +850,7 @@ async def _check_halt(state: ReporterState) -> None:
         if HALT_FILE.exists():
             await asyncio.sleep(10.0)
             # After sending, exit
-            sys.exit(1)
+            return
         await asyncio.sleep(1.0)
 
 # ── Batch mode ────────────────────────────────────────────────────────────────
@@ -921,7 +921,7 @@ def main() -> None:
 
     if HALT_FILE.exists():
         print("[TELEGRAM] SYSTEM_HALT exists — exiting", flush=True)
-        sys.exit(1)
+        return
 
     if args.mode == "batch":
         asyncio.run(run_batch())

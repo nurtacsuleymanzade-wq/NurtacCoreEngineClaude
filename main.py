@@ -109,7 +109,7 @@ def _check_system_halt() -> None:
         except Exception:
             reason = "unknown"
         print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
-        sys.exit(1)
+        return
 
 
 # ── Data quality log ──────────────────────────────────────────────────────────
@@ -430,7 +430,7 @@ async def _run_trade_stream() -> None:
                                 "missing_fields": missing,
                             })
                             await asyncio.sleep(5)
-                            sys.exit(1)
+                            return
                         _trade_schema_checked = True
 
                     ev = _parse_trade_event(msg)
@@ -516,7 +516,7 @@ async def _run_depth_stream() -> None:
                                 "missing_fields": missing,
                             })
                             await asyncio.sleep(5)
-                            sys.exit(1)
+                            return
                         _depth_schema_checked = True
 
                     time_ms = int(msg["E"])

@@ -1129,7 +1129,7 @@ def main() -> None:
 
     if HALT_FILE.exists():
         print("[SCEN] SYSTEM_HALT exists at startup — refusing to start", flush=True)
-        sys.exit(1)
+        return
 
     if args.mode == "batch":
         run_batch()
