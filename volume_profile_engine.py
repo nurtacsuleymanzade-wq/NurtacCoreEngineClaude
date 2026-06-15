@@ -97,6 +97,27 @@ def _read_all_jsonl(path: Path) -> list[dict]:
         pass
     return records
 
+def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
+    """Read only last N lines from JSONL file (memory-efficient warm-up)."""
+    if not path.exists():
+        return []
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            last_records = deque(maxlen=maxlen)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            records = list(last_records)
+    except OSError:
+        pass
+    return records
+
 def _write_jsonl(fh, rec: dict) -> None:
     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     fh.flush()
@@ -1207,11 +1228,12 @@ async def _task_5m(ctx: VolProfileCtx, batch_recs: list[dict] | None = None) -> 
 
 # ── Batch mode ─────────────────────────────────────────────────────────────────
 def run_batch() -> None:
-    print("[VP] Batch mode — loading all input files", flush=True)
+    print("[VP] Batch mode — loading input files (warm-up limits)", flush=True)
 
-    recs_1s = _read_all_jsonl(FILE_1S)
-    recs_1m = _read_all_jsonl(FILE_1M)
-    recs_5m = _read_all_jsonl(FILE_5M)
+    # Warm-up: load only last N lines per file (memory-efficient)
+    recs_1s = _read_last_n_jsonl(FILE_1S, maxlen=3600)
+    recs_1m = _read_last_n_jsonl(FILE_1M, maxlen=1000)
+    recs_5m = _read_last_n_jsonl(FILE_5M, maxlen=1000)
 
     print(f"[VP] Loaded: 1S={len(recs_1s)} 1M={len(recs_1m)} 5M={len(recs_5m)}", flush=True)
 

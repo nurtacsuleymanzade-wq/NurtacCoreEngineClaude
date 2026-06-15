@@ -25,7 +25,7 @@ import statistics
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -112,6 +112,27 @@ def _read_all_jsonl(path: Path) -> list[dict]:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+    except OSError:
+        pass
+    return records
+
+def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
+    """Read only last N lines from JSONL file (memory-efficient warm-up)."""
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            last_records = deque(maxlen=maxlen)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            records = list(last_records)
     except OSError:
         pass
     return records
@@ -941,7 +962,7 @@ def _count_key(source: str, timeframe: str) -> str:
 
 # ── Batch mode ────────────────────────────────────────────────────────────────
 def run_batch() -> None:
-    print("[HOE] Batch mode — loading all input files", flush=True)
+    print("[HOE] Batch mode — loading input files (warm-up limits)", flush=True)
     state = EngineState()
 
     # Check missing inputs
@@ -955,9 +976,9 @@ def run_batch() -> None:
         if not p.exists():
             state.missing_inputs.append(str(p))
 
-    # Load all prices
+    # Load all prices (warm-up limit for 1 hour of data)
     print("[HOE] Price index yükleniyor...", flush=True)
-    primary_recs = _read_all_jsonl(PRIMARY_FILE)
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=3600)
     prices: list[tuple[int, float]] = []
     for row in primary_recs:
         ts  = row.get("window_start_ts")
@@ -978,35 +999,35 @@ def run_batch() -> None:
     # Load all events from all sources
     all_events: list[dict] = []
 
-    # Detector events
+    # Detector events (warm-up limit)
     for det_key, det_path in DETECTOR_FILES.items():
-        for row in _read_all_jsonl(det_path):
+        for row in _read_last_n_jsonl(det_path, maxlen=500):
             ev = normalize_detector(row)
             if ev:
                 all_events.append(ev)
 
-    # Evidence events
-    for row in _read_all_jsonl(EVIDENCE_FILE):
+    # Evidence events (warm-up limit)
+    for row in _read_last_n_jsonl(EVIDENCE_FILE, maxlen=1000):
         ev = normalize_evidence(row)
         if ev:
             all_events.append(ev)
 
-    # Structure events
+    # Structure events (warm-up limit)
     for sf_key, sf_path in STRUCT_FILES.items():
-        for row in _read_all_jsonl(sf_path):
+        for row in _read_last_n_jsonl(sf_path, maxlen=500):
             ev = normalize_structure(row)
             if ev:
                 all_events.append(ev)
 
-    # Scenario events
-    for row in _read_all_jsonl(SCENARIO_FILE):
+    # Scenario events (warm-up limit)
+    for row in _read_last_n_jsonl(SCENARIO_FILE, maxlen=1000):
         ev = normalize_scenario(row)
         if ev:
             all_events.append(ev)
 
-    # Observer events (optional)
+    # Observer events (optional, warm-up limit)
     if OBS_QUAL_FILE.exists():
-        for row in _read_all_jsonl(OBS_QUAL_FILE):
+        for row in _read_last_n_jsonl(OBS_QUAL_FILE, maxlen=500):
             ev = normalize_observer(row)
             if ev:
                 all_events.append(ev)

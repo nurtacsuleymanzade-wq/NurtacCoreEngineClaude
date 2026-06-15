@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+from collections import deque
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -83,6 +84,27 @@ def _read_all_jsonl(path: Path) -> list[dict]:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+    except OSError:
+        pass
+    return records
+
+def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
+    """Read only last N lines from JSONL file (memory-efficient warm-up)."""
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            last_records = deque(maxlen=maxlen)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last_records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            records = list(last_records)
     except OSError:
         pass
     return records
@@ -831,6 +853,10 @@ class SetupTracker:
                     scenario: dict | None, det: dict, bias: dict | None,
                     baseline_1s: dict | None, obs_fh, qual_fh) -> None:
         """Process one primary bar through all active state machines."""
+        # Warn if state machines exceed safe threshold
+        if len(self.active) > 8:
+            print(f"[OBS WARNING] State machines: {len(self.active)} (max {MAX_OPEN_SETUPS})", flush=True)
+
         done: list[str] = []
         for sid, sm in list(self.active.items()):
             still_active = sm.process_bar(
@@ -845,20 +871,21 @@ class SetupTracker:
 
 # ── Batch mode ────────────────────────────────────────────────────────────────
 def run_batch() -> None:
-    print("[OBS] Batch mode — loading input files", flush=True)
+    print("[OBS] Batch mode — loading input files (warm-up limits)", flush=True)
 
-    primary_recs = _read_all_jsonl(PRIMARY_FILE)
-    setup_recs   = _read_all_jsonl(SETUPS_FILE)
-    s1s_idx      = _build_index(_read_all_jsonl(STRUCT_1S_FILE))
-    s1m_idx      = _build_index(_read_all_jsonl(STRUCT_1M_FILE))
-    vp1m_idx     = _build_index(_read_all_jsonl(VOL_1M_FILE))
-    gate_idx     = _build_index(_read_all_jsonl(GATE_FILE))
-    scen_idx     = _build_index(_read_all_jsonl(SCENARIOS_FILE))
-    bias_idx     = _build_index(_read_all_jsonl(BIAS_FILE))
-    det_idxs     = {d: _build_index(_read_all_jsonl(p))
+    # Warm-up: load only last N lines per file (memory-efficient)
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=3600)
+    setup_recs   = _read_last_n_jsonl(SETUPS_FILE, maxlen=500)
+    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=3600))
+    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=500))
+    vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
+    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=500))
+    scen_idx     = _build_index(_read_last_n_jsonl(SCENARIOS_FILE, maxlen=1000))
+    bias_idx     = _build_index(_read_last_n_jsonl(BIAS_FILE, maxlen=100))
+    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=500))
                     for d, p in DETECTOR_FILES.items()}
 
-    bl_recs      = _read_all_jsonl(BASELINE_FILE)
+    bl_recs      = _read_last_n_jsonl(BASELINE_FILE, maxlen=1000)
     baseline_1s  = _load_baseline(bl_recs, "1S")
 
     # Index setups by window_start_ts for lookup
