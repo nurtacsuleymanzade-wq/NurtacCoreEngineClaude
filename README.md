@@ -15,6 +15,7 @@ Algorithmic trading engine — core data layer for BTCUSDT on Binance USDⓈ-M F
 | Layer-6 | `smart_money_engine.py` | 5 timeframes → Market structure (Swings / BOS / CHoCH / MSB / OB / FVG) |
 | Layer-7 | `evidence_engine.py` | Evidence scoring (candle/gate/structure/detector/baseline/market_context/scenario) → Evidence stream + Setup generator |
 | Layer-9 | `scenario_engine.py` | 9 scenario detectors → Market behavior pattern recognition (Scenario stream + Memory) |
+| Layer-10 | `observer_engine.py` | Observes L7 setups, runs state machines per setup, qualifies via 7 transition events → Observations + Qualified setups |
 | Market Context | `market_context_engine.py` | Binance Public API → OI / Funding / L/S / Taker / Liquidation heatmap → Bias context |
 
 ## Layer-0 Output Files
@@ -79,6 +80,38 @@ Liquidation stream cascade detection · Liquidation heatmap max pain
 **Bias integration in Layer-7:** `evidence_engine.py` reads the latest
 `bias_context.jsonl` record; `dominant_bias=="long"` adds +1.0/+2.0 to
 `long_score`; `dominant_bias=="short"` adds to `short_score`.
+
+## Layer-10 Observer + Setup Qualifier
+
+Watches Layer-7 setups from `data/setups.jsonl`, runs a per-setup state machine,
+and qualifies them when all transition and confirmation criteria are met.
+Triggered by each new 1S bar. No signals, no orders.
+
+| Output | File |
+|---|---|
+| Observation stream | `data/observations.jsonl` |
+| Qualified setups | `data/qualified_setups.jsonl` |
+
+```bash
+python3 observer_engine.py --mode batch
+python3 observer_engine.py --mode live
+FULL_PRINT=true python3 observer_engine.py --mode live
+```
+
+**State machine per setup:** WAITING → DEVELOPING → QUALIFYING → QUALIFIED / INVALIDATED / EXPIRED
+
+**Transition events detected:** RECLAIM_VALUE · RECLAIM_POC · PULLBACK_IN_PROGRESS ·
+PULLBACK_COMPLETE · HOLD_CONFIRMED · BREAKOUT_CONFIRMED · BREAKOUT_WEAK ·
+FOLLOW_THROUGH_STRONG · FOLLOW_THROUGH_WEAK · REJECTION_CONFIRMED · FAILED_BREAKOUT
+
+**Qualification criteria (F1–F5):** delta aligned · structure aligned (trend/BOS) ·
+location valid · scenario direction aligned · bias aligned
+
+**Invalidation triggers:** close beyond SL · FAILED_BREAKOUT · confirmed opposing scenario
+
+**Timeouts:** WAITING 60s · DEVELOPING 120s · global lifetime 300s
+
+**Max concurrent setups:** 10 (oldest expires if exceeded)
 
 ## Layer-9 Scenario Engine
 
