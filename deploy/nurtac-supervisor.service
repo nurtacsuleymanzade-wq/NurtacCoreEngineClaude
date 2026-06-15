@@ -1,0 +1,18 @@
+[Unit]
+Description=NurtacCoreEngineClaude Production Supervisor (Single Process)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+EnvironmentFile=/root/NurtacCoreEngineClaude/.env
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 production_supervisor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+MemoryMax=800M
+MemorySwapMax=300M
+
+[Install]
+WantedBy=multi-user.target
