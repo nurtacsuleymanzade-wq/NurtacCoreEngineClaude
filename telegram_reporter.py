@@ -147,6 +147,8 @@ class MessageQueue:
         self.sent_count = 0
         self.failed_count = 0
         self.processed_ids: set[str] = set()
+        self.message_hashes: dict[str, float] = {}  # hash -> timestamp mapping
+        self.last_hourly_sent_hour: int = -1  # track last sent hour
 
     def can_send(self, cooldown_key: str, cooldown_sec: int) -> bool:
         now = time.time()
@@ -169,6 +171,17 @@ class MessageQueue:
     def mark_processed(self, obj_id: str) -> None:
         self.processed_ids.add(obj_id)
 
+    def is_duplicate_message(self, text: str, cooldown_sec: int = 60) -> bool:
+        import hashlib
+        msg_hash = hashlib.md5(text.encode()).hexdigest()
+        now = time.time()
+        if msg_hash in self.message_hashes:
+            last_sent = self.message_hashes[msg_hash]
+            if now - last_sent < cooldown_sec:
+                return True
+        self.message_hashes[msg_hash] = now
+        return False
+
 # ── State ─────────────────────────────────────────────────────────────────────
 class ReporterState:
     def __init__(self):
@@ -180,7 +193,7 @@ class ReporterState:
         self.last_gate_ts: int = 0
         self.last_quality_ts: int = 0
         self.last_validator_ts: int = 0
-        self.current_price: float = 0.0
+        self.current_price: float | None = None
         self.active_scenario: str | None = None
         self.warnings: list[str] = []
         self.errors: list[str] = []
@@ -234,6 +247,11 @@ async def message_worker(state: ReporterState) -> None:
         if now - last_send_time < 1.0:
             await asyncio.sleep(1.0 - (now - last_send_time))
         last_send_time = time.time()
+
+        # Duplicate check (60 sec cooldown on content)
+        if state.mq.is_duplicate_message(text, cooldown_sec=60):
+            _log_message(msg_type, "skipped_duplicate", None, text[:100], 0)
+            continue
 
         # Cooldown check
         if cooldown_key and not state.mq.can_send(cooldown_key, 30):  # simplified check
@@ -448,6 +466,9 @@ def format_hourly_summary(state: ReporterState) -> str:
     completed_obs = outcome_health.get("completed_observations", 0)
     open_obs = outcome_health.get("open_observations", 0)
 
+    # Format price: show N/A if not available
+    price_str = f"{state.current_price:.2f}" if state.current_price and state.current_price > 0 else "N/A"
+
     return f"""<b>📊 SAATLIK ÖZET</b>
 ━━━━━━━━━━━━━━━━━━━
 ⏰ {hour:02d}:00 UTC
@@ -465,7 +486,7 @@ def format_hourly_summary(state: ReporterState) -> str:
   Tamamlanan: {completed_obs}
   Açık: {open_obs}
 
-💹 <b>Güncel BTC:</b> {state.current_price:.2f}
+💹 <b>Güncel BTC:</b> {price_str}
 🧩 <b>Aktif Senaryo:</b> {state.active_scenario or "none"}"""
 
 def format_daily_summary(state: ReporterState) -> str:
@@ -723,11 +744,19 @@ async def _tail_price(state: ReporterState) -> None:
                 row = json.loads(line)
                 cdna = row.get("candle_dna") or {}
                 co = cdna.get("close")
+                has_trade = row.get("has_trade", True)
+
                 if isinstance(co, dict):
-                    px = _sf(co.get("price"), 0.0)
+                    px = _sf(co.get("price"), None)
                 else:
-                    px = _sf(co, 0.0)
-                if px > 0:
+                    px = _sf(co, None)
+
+                # If null or has_trade=false, check carry_forward_price
+                if px is None or px <= 0 or not has_trade:
+                    cfp = row.get("carry_forward_price")
+                    px = _sf(cfp, None)
+
+                if px is not None and px > 0:
                     state.current_price = px
             except Exception:
                 pass
@@ -743,11 +772,19 @@ async def _tail_price(state: ReporterState) -> None:
                 row = json.loads(line)
                 cdna = row.get("candle_dna") or {}
                 co = cdna.get("close")
+                has_trade = row.get("has_trade", True)
+
                 if isinstance(co, dict):
-                    px = _sf(co.get("price"), 0.0)
+                    px = _sf(co.get("price"), None)
                 else:
-                    px = _sf(co, 0.0)
-                if px > 0:
+                    px = _sf(co, None)
+
+                # If null or has_trade=false, check carry_forward_price
+                if px is None or px <= 0 or not has_trade:
+                    cfp = row.get("carry_forward_price")
+                    px = _sf(cfp, None)
+
+                if px is not None and px > 0:
                     state.current_price = px
             except Exception:
                 pass
@@ -766,12 +803,15 @@ async def _periodic(state: ReporterState) -> None:
             write_health(state)
             last_health = now
 
-        # Hourly summary
+        # Hourly summary (only once per hour, on hour change)
         dt_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        if dt_now.hour != state.last_hourly_hour:
+        current_hour = dt_now.hour
+        if current_hour != state.last_hourly_hour:
             text = format_hourly_summary(state)
             await state.mq.enqueue("hourly_summary", text)
-            state.last_hourly_hour = dt_now.hour
+            state.last_hourly_hour = current_hour
+            # Track in message queue to prevent re-sending in same hour
+            state.mq.last_hourly_sent_hour = current_hour
             last_hourly = now
 
         # Daily summary

@@ -156,6 +156,14 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     if status != "open":
         return False
 
+    # Check if setup is too old (> 24 hours)
+    now_ms = int(time.time() * 1000)
+    qual_ts = setup.get("qualification_ts", 0)
+    if qual_ts and (now_ms - qual_ts) > 86400000:  # 24 hours in ms
+        age_s = (now_ms - qual_ts) / 1000
+        print(f"[PAPER SKIP] Setup too old: {age_s:.0f}s", flush=True)
+        return False
+
     # C2: not already processed
     src_id = setup.get("qualified_setup_id") or setup.get("setup_id", "")
     if not src_id or src_id in state.processed_setup_ids:
@@ -243,6 +251,17 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
 
         "market_questions": setup.get("market_questions") or {},
     }
+
+    # Check SL validity
+    if sl_price is None or sl_price <= 0:
+        print("[PAPER SKIP] Invalid SL", flush=True)
+        return False
+
+    # Check SL distance (warn if too wide)
+    sl_dist = abs(open_price - sl_price)
+    if atr_used > 0 and sl_dist > atr_used * 2.0:
+        print(f"[PAPER WARNING] SL too wide: {sl_dist:.2f} vs ATR {atr_used:.2f}", flush=True)
+        # Log but proceed (don't reject)
 
     # Open validation
     errors = _validate_open(trade)
@@ -633,6 +652,7 @@ def _write_open_positions(state: TradeState) -> None:
         cur_r = ((cp - op) / risk) if d == "long" else ((op - cp) / risk)
         items.append({
             "trade_id":                 trade["trade_id"],
+            "source_setup_id":          trade["source_setup_id"],
             "direction":                d,
             "open_ts":                  trade["open_ts"],
             "open_price":               trade["open_price"],
@@ -752,7 +772,7 @@ def restore_state(state: TradeState) -> None:
         state.completed_trades.append(rec)
     state.total_closed = len(state.completed_trades)
 
-    # Restore open trades
+    # Load open trade setup IDs (prevent re-opening)
     if OPEN_FILE.exists():
         try:
             with open(OPEN_FILE, "r", encoding="utf-8") as f:
@@ -760,10 +780,9 @@ def restore_state(state: TradeState) -> None:
         except Exception:
             data = {}
         for t in (data.get("trades") or []):
-            tid = t.get("trade_id")
-            if tid:
-                # We don't have full trade state from snapshot, skip (can't restore fully)
-                pass
+            sid = t.get("source_setup_id")
+            if sid:
+                state.processed_setup_ids.add(sid)
 
     n = len(state.completed_trades)
     print(f"[PAPER] Restored {n} completed trades, "
