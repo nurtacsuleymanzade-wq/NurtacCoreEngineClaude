@@ -97,8 +97,9 @@ async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) 
             # Call function (may be sync or async)
             if asyncio.iscoroutinefunction(func):
                 await func()
-                print(f"[SUPERVISOR] ✓ {module_name}.{func_name} normal olarak sonlandı", flush=True)
-                break  # Exit after successful completion
+                print(f"[SUPERVISOR] ✓ {module_name}.{func_name} sonlandı, 5s sonra yeniden başlatılıyor...", flush=True)
+                await asyncio.sleep(5)
+                # break YOK — döngü devam eder, engine yeniden başlar
             else:
                 # Sync function — detect if it's "main" (runs forever)
                 if func_name == "main":
