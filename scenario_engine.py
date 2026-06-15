@@ -807,16 +807,16 @@ def run_batch() -> None:
     print("[SCEN] Batch mode — loading input files (warm-up limits)", flush=True)
 
     # Warm-up: load only last N lines per file (memory-efficient)
-    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=3600)
-    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=3600))
-    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=500))
-    s5m_idx      = _build_index(_read_last_n_jsonl(STRUCT_5M_FILE, maxlen=500))
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
+    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=300))
+    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=100))
+    s5m_idx      = _build_index(_read_last_n_jsonl(STRUCT_5M_FILE, maxlen=100))
     vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
     vp_ses_idx   = _build_index(_read_last_n_jsonl(VOL_SES_FILE, maxlen=100))
-    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=500))
-    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=500)) for d, p in DETECTOR_FILES.items()}
+    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=100))
+    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=100)) for d, p in DETECTOR_FILES.items()}
 
-    bl_recs    = _read_last_n_jsonl(BASELINE_FILE, maxlen=1000)
+    bl_recs    = _read_last_n_jsonl(BASELINE_FILE, maxlen=100)
     baseline_1s = _load_baseline_1s(bl_recs)
     baseline_1m = _load_baseline_1m(bl_recs)
     bias_rec   = _read_last_line(BIAS_FILE)

@@ -5,11 +5,14 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStartPre=/bin/sleep 25
 ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 market_context_engine.py --mode live
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+MemoryMax=400M
+MemorySwapMax=200M
 
 [Install]
 WantedBy=multi-user.target

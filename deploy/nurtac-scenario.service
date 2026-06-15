@@ -5,9 +5,12 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStartPre=/bin/sleep 35
 ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 scenario_engine.py --mode live
 Restart=always
 RestartSec=5
+MemoryMax=400M
+MemorySwapMax=200M
 
 [Install]
 WantedBy=multi-user.target

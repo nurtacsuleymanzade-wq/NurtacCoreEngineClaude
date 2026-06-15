@@ -6,9 +6,12 @@ After=network-online.target
 Type=simple
 WorkingDirectory=/root/NurtacCoreEngineClaude
 EnvironmentFile=/root/NurtacCoreEngineClaude/.env
+ExecStartPre=/bin/sleep 55
 ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 telegram_reporter.py --mode live
 Restart=always
 RestartSec=5
+MemoryMax=400M
+MemorySwapMax=200M
 
 [Install]
 WantedBy=multi-user.target

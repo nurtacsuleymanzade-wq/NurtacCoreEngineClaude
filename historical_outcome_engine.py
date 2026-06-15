@@ -978,7 +978,7 @@ def run_batch() -> None:
 
     # Load all prices (warm-up limit for 1 hour of data)
     print("[HOE] Price index yükleniyor...", flush=True)
-    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=3600)
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
     prices: list[tuple[int, float]] = []
     for row in primary_recs:
         ts  = row.get("window_start_ts")
@@ -1001,33 +1001,33 @@ def run_batch() -> None:
 
     # Detector events (warm-up limit)
     for det_key, det_path in DETECTOR_FILES.items():
-        for row in _read_last_n_jsonl(det_path, maxlen=500):
+        for row in _read_last_n_jsonl(det_path, maxlen=100):
             ev = normalize_detector(row)
             if ev:
                 all_events.append(ev)
 
     # Evidence events (warm-up limit)
-    for row in _read_last_n_jsonl(EVIDENCE_FILE, maxlen=1000):
+    for row in _read_last_n_jsonl(EVIDENCE_FILE, maxlen=100):
         ev = normalize_evidence(row)
         if ev:
             all_events.append(ev)
 
     # Structure events (warm-up limit)
     for sf_key, sf_path in STRUCT_FILES.items():
-        for row in _read_last_n_jsonl(sf_path, maxlen=500):
+        for row in _read_last_n_jsonl(sf_path, maxlen=100):
             ev = normalize_structure(row)
             if ev:
                 all_events.append(ev)
 
     # Scenario events (warm-up limit)
-    for row in _read_last_n_jsonl(SCENARIO_FILE, maxlen=1000):
+    for row in _read_last_n_jsonl(SCENARIO_FILE, maxlen=100):
         ev = normalize_scenario(row)
         if ev:
             all_events.append(ev)
 
     # Observer events (optional, warm-up limit)
     if OBS_QUAL_FILE.exists():
-        for row in _read_last_n_jsonl(OBS_QUAL_FILE, maxlen=500):
+        for row in _read_last_n_jsonl(OBS_QUAL_FILE, maxlen=100):
             ev = normalize_observer(row)
             if ev:
                 all_events.append(ev)

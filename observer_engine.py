@@ -874,18 +874,18 @@ def run_batch() -> None:
     print("[OBS] Batch mode — loading input files (warm-up limits)", flush=True)
 
     # Warm-up: load only last N lines per file (memory-efficient)
-    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=3600)
-    setup_recs   = _read_last_n_jsonl(SETUPS_FILE, maxlen=500)
-    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=3600))
-    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=500))
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
+    setup_recs   = _read_last_n_jsonl(SETUPS_FILE, maxlen=100)
+    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=300))
+    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=100))
     vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
-    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=500))
-    scen_idx     = _build_index(_read_last_n_jsonl(SCENARIOS_FILE, maxlen=1000))
+    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=100))
+    scen_idx     = _build_index(_read_last_n_jsonl(SCENARIOS_FILE, maxlen=100))
     bias_idx     = _build_index(_read_last_n_jsonl(BIAS_FILE, maxlen=100))
-    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=500))
+    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=100))
                     for d, p in DETECTOR_FILES.items()}
 
-    bl_recs      = _read_last_n_jsonl(BASELINE_FILE, maxlen=1000)
+    bl_recs      = _read_last_n_jsonl(BASELINE_FILE, maxlen=100)
     baseline_1s  = _load_baseline(bl_recs, "1S")
 
     # Index setups by window_start_ts for lookup

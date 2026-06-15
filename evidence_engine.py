@@ -1063,7 +1063,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     # Warm-up: skip existing records (process but don't write)
-    primary_existing = _read_last_n_jsonl(PRIMARY_FILE, 3600)
+    primary_existing = _read_last_n_jsonl(PRIMARY_FILE, 300)
     print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
 
     with (open(EVIDENCE_FILE, "a", encoding="utf-8") as ev_fh,

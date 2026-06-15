@@ -1231,9 +1231,9 @@ def run_batch() -> None:
     print("[VP] Batch mode — loading input files (warm-up limits)", flush=True)
 
     # Warm-up: load only last N lines per file (memory-efficient)
-    recs_1s = _read_last_n_jsonl(FILE_1S, maxlen=3600)
-    recs_1m = _read_last_n_jsonl(FILE_1M, maxlen=1000)
-    recs_5m = _read_last_n_jsonl(FILE_5M, maxlen=1000)
+    recs_1s = _read_last_n_jsonl(FILE_1S, maxlen=300)
+    recs_1m = _read_last_n_jsonl(FILE_1M, maxlen=100)
+    recs_5m = _read_last_n_jsonl(FILE_5M, maxlen=100)
 
     print(f"[VP] Loaded: 1S={len(recs_1s)} 1M={len(recs_1m)} 5M={len(recs_5m)}", flush=True)
 
