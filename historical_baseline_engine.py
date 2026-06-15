@@ -64,7 +64,8 @@ FILE_WAIT_SLEEP = 0.5    # seconds between file-existence checks (live mode)
 
 
 # ── SYSTEM_HALT check ─────────────────────────────────────────────────────────
-def _check_system_halt() -> None:
+def _check_system_halt() -> bool:
+    """Check if SYSTEM_HALT exists. Return True if halt is set."""
     if os.path.exists(HALT_FILE):
         try:
             with open(HALT_FILE, "r", encoding="utf-8") as fh:
@@ -72,8 +73,9 @@ def _check_system_halt() -> None:
             reason = info.get("reason", "unknown")
         except Exception:
             reason = "unknown"
-        print(f"SYSTEM_HALT tespit edildi, {reason}, program durduruluyor")
-        sys.exit(1)
+        print(f"[HBE] SYSTEM_HALT tespit edildi: {reason}")
+        return True
+    return False
 
 
 # ── Normalization ──────────────────────────────────────────────────────────────
@@ -601,7 +603,8 @@ def _read_all_lines(path: str) -> tuple[list[dict], int]:
 
 # ── Batch mode ────────────────────────────────────────────────────────────────
 def run_batch() -> None:
-    _check_system_halt()
+    if _check_system_halt():
+        return
     print("NurtacCoreEngineClaude — Layer-3 Baseline Engine (batch)")
     print(f"Output: {OUTPUT_FILE}")
     print()
@@ -640,7 +643,8 @@ async def _tail_follow(
 ) -> None:
     """Tail-follow one JSONL file starting from start_pos (after warm-up)."""
     while not os.path.exists(path):
-        _check_system_halt()
+        if _check_system_halt():
+            return
         print(f"[{tf}] Waiting for {path}...")
         await asyncio.sleep(FILE_WAIT_SLEEP)
 
@@ -674,9 +678,26 @@ async def _tail_follow(
 
 
 async def run_live() -> None:
-    _check_system_halt()
+    """Live mode: warm-up then tail-follow all source files."""
     print("NurtacCoreEngineClaude — Layer-3 Baseline Engine (live)")
     print(f"Output: {OUTPUT_FILE}")
+
+    # Wait for at least one source file to exist
+    print("Waiting for source files to appear...")
+    while True:
+        if os.path.exists(HALT_FILE):
+            print("[HBE] SYSTEM_HALT — exiting")
+            return
+
+        # Check if any source file exists
+        any_exists = any(os.path.exists(path) for path in SOURCE_FILES.values())
+        if any_exists:
+            break
+
+        await asyncio.sleep(1.0)
+
+    if _check_system_halt():
+        return
     print("Warming up — reading existing records...")
     print()
 

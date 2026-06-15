@@ -4,6 +4,8 @@ NurtacCoreEngineClaude Production Supervisor
 Tüm 17 engine'i tek bir asyncio event loop içinde çalıştırır.
 Process count: 19 → 1
 RAM usage: 3.8GB → 400-600MB (85% tasarrufu)
+
+Her engine'i try/except ile sar — bir engine çökse bile supervisor devam eder.
 """
 
 import asyncio
@@ -12,7 +14,11 @@ import sys
 import os
 import time
 import resource
+import traceback
 from pathlib import Path
+
+# Tüm stderr'ı stdout'a yönlendir (journalctl'a yazılsın)
+sys.stderr = sys.stdout
 
 # DATA_DIR setup
 DATA_DIR = Path("data")
@@ -53,7 +59,11 @@ def get_memory_mb() -> float:
         return 0.0
 
 async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) -> None:
-    """Run engine function in a loop, restarting on crash."""
+    """Run engine function in a loop, restarting on crash.
+
+    CRITICAL: Her engine'nin hatası supervisor'ı çökmesine izin vermemeli.
+    Try/except ile tüm engine hatalarını yakala, log et, yeniden başlat.
+    """
     func = None
     func_name = None
 
@@ -66,21 +76,22 @@ async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) 
                 func_name = cand_name
                 break
     except ImportError as e:
-        print(f"[SUPERVISOR] HATA: {module_name} import edilemedi: {e}", flush=True)
+        print(f"[SUPERVISOR] ❌ HATA: {module_name} import edilemedi: {e}", flush=True)
         await asyncio.sleep(5)
         return
 
     if func is None:
         print(
-            f"[SUPERVISOR] HATA: {module_name} için fonksiyon bulunamadı. "
+            f"[SUPERVISOR] ❌ HATA: {module_name} için fonksiyon bulunamadı. "
             f"Aranılan: {', '.join(candidate_funcs)}",
             flush=True
         )
         await asyncio.sleep(5)
         return
 
-    print(f"[SUPERVISOR] {module_name}.{func_name} başlatılıyor...", flush=True)
+    print(f"[SUPERVISOR] ▶ {module_name}.{func_name} başlatılıyor...", flush=True)
 
+    crash_count = 0
     while not HALT_FILE.exists():
         try:
             # Call function (may be sync or async)
@@ -88,20 +99,29 @@ async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) 
                 await func()
             else:
                 # Sync function — run in thread pool to avoid blocking event loop
-                # Note: This blocks the thread but doesn't block event loop
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, func)
 
-            print(f"[SUPERVISOR] {module_name}.{func_name} normal olarak sonlandı", flush=True)
+            print(f"[SUPERVISOR] ✓ {module_name}.{func_name} normal olarak sonlandı", flush=True)
             break  # Exit after successful completion
 
         except asyncio.CancelledError:
-            print(f"[SUPERVISOR] {module_name} iptal edildi", flush=True)
+            print(f"[SUPERVISOR] ⊘ {module_name} iptal edildi", flush=True)
             raise
         except Exception as e:
-            print(f"[SUPERVISOR] HATA: {module_name} çöktü: {e}", flush=True)
-            print(f"[SUPERVISOR] {module_name} 5 saniye sonra yeniden başlatılıyor...", flush=True)
-            await asyncio.sleep(5)
+            crash_count += 1
+            print(f"[SUPERVISOR] ❌ CRASH #{crash_count}: {module_name}", flush=True)
+            print(f"[SUPERVISOR] ❌ Hata: {type(e).__name__}: {e}", flush=True)
+
+            # Traceback'i de print et
+            print(f"[SUPERVISOR] ❌ Traceback:", flush=True)
+            tb_lines = traceback.format_exc().split('\n')
+            for line in tb_lines:
+                if line:
+                    print(f"[SUPERVISOR]   {line}", flush=True)
+
+            print(f"[SUPERVISOR] ⏳ {module_name} 10 saniye sonra yeniden başlıyor (Crash #{crash_count})...", flush=True)
+            await asyncio.sleep(10)
 
 async def memory_monitor() -> None:
     """Periodically log memory usage."""

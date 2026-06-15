@@ -11,8 +11,8 @@ Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-MemoryMax=800M
-MemorySwapMax=300M
+MemoryMax=1500M
+MemorySwapMax=700M
 
 [Install]
 WantedBy=multi-user.target
