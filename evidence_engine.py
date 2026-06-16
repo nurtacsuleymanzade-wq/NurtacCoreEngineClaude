@@ -420,9 +420,8 @@ def compute_evidence(
         "depth_bid_dominant":   d_bid,
         "depth_ask_dominant":   d_ask,
     }
-    score_breakdown["A_candle_dna"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["candle_dna_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["candle_dna_short"] = round(short_score - _pre_short, 4)
 
     # ── B. Gate ───────────────────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -442,9 +441,8 @@ def compute_evidence(
     g_comp["grade"]     = gate_grade
     g_comp["direction"] = gate_dir
     comps["gate"] = g_comp
-    score_breakdown["B_gate"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["gate_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["gate_short"] = round(short_score - _pre_short, 4)
 
     # ── C. Smart Money ────────────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -506,9 +504,8 @@ def compute_evidence(
     if sm5m["trend_uptrend_5m"]:  long_score  += 1.0
     if sm5m["trend_downtrend_5m"]: short_score += 1.0
     comps["smart_money_5m"] = sm5m
-    score_breakdown["C_smart_money"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["smart_money_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["smart_money_short"] = round(short_score - _pre_short, 4)
 
     # ── D. Detectors ──────────────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -517,9 +514,8 @@ def compute_evidence(
     long_score  += det_long
     short_score += det_short
     comps["detectors"] = det_comps
-    score_breakdown["D_detector"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["detector_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["detector_short"] = round(short_score - _pre_short, 4)
 
     # ── E. Baseline ───────────────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -549,9 +545,8 @@ def compute_evidence(
     if bl_comp["atr_extreme_high"]:
         long_score  *= 0.85
         short_score *= 0.85
-    score_breakdown["E_baseline"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["baseline_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["baseline_short"] = round(short_score - _pre_short, 4)
 
     # ── F. Market Context Bias ────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -570,9 +565,8 @@ def compute_evidence(
         "long_contribution":  mc_long,
         "short_contribution": mc_short,
     }
-    score_breakdown["F_market_context"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["market_context_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["market_context_short"] = round(short_score - _pre_short, 4)
 
     # ── G. Volume Profile Bias ────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -615,9 +609,8 @@ def compute_evidence(
     long_score  += vp_long
     short_score += vp_short
     comps["volume_profile_bias"] = vp_comp
-    score_breakdown["G_volume_profile"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["volume_profile_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["volume_profile_short"] = round(short_score - _pre_short, 4)
 
     # ── H. Scenario Bias ──────────────────────────────────────────────────────
     _pre_long, _pre_short = long_score, short_score
@@ -679,9 +672,8 @@ def compute_evidence(
     long_score  += sc_long
     short_score += sc_short
     comps["scenario_bias"] = sc_comp
-    score_breakdown["H_scenario"] = round(
-        (long_score - _pre_long) - (short_score - _pre_short), 4
-    )
+    score_breakdown["scenario_long"]  = round(long_score  - _pre_long,  4)
+    score_breakdown["scenario_short"] = round(short_score - _pre_short, 4)
 
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
