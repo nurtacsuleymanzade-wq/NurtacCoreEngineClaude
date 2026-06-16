@@ -1115,17 +1115,32 @@ class LiveCtx:
         self.baseline_1m: dict | None = None
         self.setup_state = SetupState()
 
+def _inode(path: Path) -> int | None:
+    """rotate_data.sh gibi araçlar dosyayı `tail | mv` ile değiştirdiğinde
+    inode değişir. Açık bir file handle eski (silinmiş) inode'a bağlı kalır
+    ve hiçbir zaman yeni veri görmez — sessizce donar. Bu yüzden periyodik
+    olarak inode karşılaştırması yapıp gerekirse dosyayı yeniden açıyoruz."""
+    try:
+        return os.stat(path).st_ino
+    except OSError:
+        return None
+
 async def _tail_secondary_file(
     path: Path, cache: dict[int, dict],
     label: str, ctx: LiveCtx = None, is_baseline: bool = False
 ) -> None:
-    """Tail a secondary file and update cache or baseline."""
+    """Tail a secondary file and update cache or baseline.
+
+    Dosya rotate edilirse (inode değişirse) handle'ı kapatıp yeniden açar,
+    böylece dosya sessizce takılı kalmaz."""
     while not path.exists():
         if HALT_FILE.exists():
             return
         await asyncio.sleep(1.0)
 
-    with open(path, "r", encoding="utf-8") as f:
+    f = open(path, "r", encoding="utf-8")
+    inode = os.fstat(f.fileno()).st_ino
+    try:
         for line in f:
             line = line.strip()
             if not line:
@@ -1147,6 +1162,13 @@ async def _tail_secondary_file(
                 return
             line = f.readline()
             if not line:
+                cur_inode = _inode(path)
+                if cur_inode is not None and cur_inode != inode:
+                    print(f"[EV] {label}: {path.name} rotate edildi (inode değişti), yeniden açılıyor", flush=True)
+                    f.close()
+                    f = open(path, "r", encoding="utf-8")
+                    inode = os.fstat(f.fileno()).st_ino
+                    continue
                 await asyncio.sleep(POLL_SLEEP)
                 continue
             line = line.strip()
@@ -1163,6 +1185,8 @@ async def _tail_secondary_file(
                         cache[int(ts)] = rec
             except (json.JSONDecodeError, Exception):
                 pass
+    finally:
+        f.close()
 
 async def _primary_task(ctx: LiveCtx) -> None:
     """Process primary file and write evidence + setups."""
@@ -1175,13 +1199,15 @@ async def _primary_task(ctx: LiveCtx) -> None:
     primary_existing = _read_last_n_jsonl(PRIMARY_FILE, 300)
     print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
 
-    with (open(EVIDENCE_FILE, "a", encoding="utf-8") as ev_fh,
-          open(SETUPS_FILE,   "a", encoding="utf-8") as se_fh,
-          open(PRIMARY_FILE,  "r", encoding="utf-8") as pf):
+    ev_fh = open(EVIDENCE_FILE, "a", encoding="utf-8")
+    se_fh = open(SETUPS_FILE,   "a", encoding="utf-8")
+    pf    = open(PRIMARY_FILE,  "r", encoding="utf-8")
+    pf_inode = os.fstat(pf.fileno()).st_ino
 
-        # Seek to end
-        pf.seek(0, 2)
+    # Seek to end
+    pf.seek(0, 2)
 
+    try:
         while True:
             if HALT_FILE.exists():
                 print("[EV] SYSTEM_HALT — stopping", flush=True)
@@ -1189,6 +1215,27 @@ async def _primary_task(ctx: LiveCtx) -> None:
 
             line = pf.readline()
             if not line:
+                # rotate_data.sh `tail | mv` ile dosyayı değiştirebilir; bu durumda
+                # elimizdeki fd eski (silinmiş) inode'a saplanır ve hiçbir zaman yeni
+                # veri görmez — sessizce donar. inode değiştiyse yeniden aç.
+                cur_inode = _inode(PRIMARY_FILE)
+                if cur_inode is not None and cur_inode != pf_inode:
+                    print("[EV] PRIMARY_FILE rotate edildi (inode değişti), yeniden açılıyor", flush=True)
+                    pf.close()
+                    pf = open(PRIMARY_FILE, "r", encoding="utf-8")
+                    pf_inode = os.fstat(pf.fileno()).st_ino
+                    continue
+                # ev_fh/se_fh de aynı şekilde rotate edilebilir (append mod ile açık
+                # olan handle'lar da eski inode'a yazmaya devam eder, dışarıdan
+                # görünmez olur). Aynı kontrolü onlar için de yap.
+                if _inode(EVIDENCE_FILE) is not None and _inode(EVIDENCE_FILE) != os.fstat(ev_fh.fileno()).st_ino:
+                    print("[EV] EVIDENCE_FILE rotate edildi, yeniden açılıyor", flush=True)
+                    ev_fh.close()
+                    ev_fh = open(EVIDENCE_FILE, "a", encoding="utf-8")
+                if _inode(SETUPS_FILE) is not None and _inode(SETUPS_FILE) != os.fstat(se_fh.fileno()).st_ino:
+                    print("[EV] SETUPS_FILE rotate edildi, yeniden açılıyor", flush=True)
+                    se_fh.close()
+                    se_fh = open(SETUPS_FILE, "a", encoding="utf-8")
                 await asyncio.sleep(POLL_SLEEP)
                 continue
             line = line.strip()
@@ -1225,6 +1272,10 @@ async def _primary_task(ctx: LiveCtx) -> None:
             _write_jsonl(ev_fh, ev)
             try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m,
                                raw, ctx.setup_state, se_fh)
+    finally:
+        pf.close()
+        ev_fh.close()
+        se_fh.close()
 
 async def run_live() -> None:
     ctx = LiveCtx()
@@ -1246,6 +1297,21 @@ async def run_live() -> None:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         print("[EV] Tasks cancelled", flush=True)
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        raise
+    except Exception as e:
+        # Hiçbir exception sessizce yutulmasın — logla, traceback'i yazdır,
+        # diğer alt task'ları da iptal et ve yeniden fırlat (supervisor restart edebilsin).
+        print(f"[EV] FATAL: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 # ── Entry point ────────────────────────────────────────────────────────────────────
 def main() -> None:

@@ -49,6 +49,23 @@ ENGINES = [
 # State
 tasks: dict[str, asyncio.Task] = {}
 last_memory_check = time.time()
+SUPERVISOR_START_TS = time.time()
+
+# Watchdog: output dosyası → (max yaş saniye, sahibi engine modülü ya da systemd servisi)
+# module ile birlikte verilen değer için tasks[module] cancel edilip yeniden oluşturulur.
+# service ile verilen değer için (supervisor'ın yönetmediği ayrı bir systemd servisi)
+# `systemctl restart <service>` çalıştırılır.
+FILE_HEALTH = [
+    ("data/combined_1s_dna_btcusdt.jsonl", 10,  None,             "nurtac-layer0"),
+    ("data/evidence_stream.jsonl",         120, "evidence_engine", None),
+    ("data/scenarios.jsonl",               120, "scenario_engine", None),
+    ("data/labels_absorption.jsonl",       30,  "detector_engine", None),
+    ("data/decision_gate_output.jsonl",    30,  "decision_gate",   None),
+]
+WATCHDOG_INTERVAL_S   = 60
+WATCHDOG_GRACE_S      = 90   # başlangıçta dosyalar henüz oluşmamış olabilir, ilk grace süresi bekle
+WATCHDOG_RESTART_COOLDOWN_S = 90  # aynı hedefi art arda restart etmemek için
+last_watchdog_restart: dict[str, float] = {}
 
 def get_memory_mb() -> float:
     """Get current process memory usage in MB."""
@@ -138,6 +155,76 @@ async def run_engine_with_restart(module_name: str, candidate_funcs: list[str]) 
             print(f"[SUPERVISOR] ⏳ {module_name} 10 saniye sonra yeniden başlıyor (Crash #{crash_count})...", flush=True)
             await asyncio.sleep(10)
 
+ENGINE_FUNCS: dict[str, list[str]] = dict(ENGINES)
+
+async def watchdog_health_check() -> None:
+    """Her WATCHDOG_INTERVAL_S saniyede bir output dosyalarının yaşını kontrol et.
+
+    Bir dosya beklenenden eski ise, sahibi olan engine sessizce ölmüş demektir
+    (exception fırlatmadan takılı kalmış olabilir). Bu durumda:
+      1. Logla
+      2. İlgili task'ı cancel et (ya da harici servisse systemctl restart)
+      3. 5 saniye bekle
+      4. Task'ı yeniden oluştur
+    """
+    while not HALT_FILE.exists():
+        await asyncio.sleep(WATCHDOG_INTERVAL_S)
+
+        if time.time() - SUPERVISOR_START_TS < WATCHDOG_GRACE_S:
+            continue  # engine'ler henüz ısınıyor, ilk dosyalar oluşmamış olabilir
+
+        now = time.time()
+        for rel_path, max_age_s, module_name, service_name in FILE_HEALTH:
+            target = module_name or service_name
+            try:
+                if not os.path.exists(rel_path):
+                    age_s = None
+                else:
+                    age_s = now - os.path.getmtime(rel_path)
+            except OSError as e:
+                print(f"[WATCHDOG] ⚠ {rel_path} okunamadı: {e}", flush=True)
+                continue
+
+            stale = age_s is None or age_s > max_age_s
+            if not stale:
+                continue
+
+            last_restart = last_watchdog_restart.get(target, 0.0)
+            if now - last_restart < WATCHDOG_RESTART_COOLDOWN_S:
+                continue  # az önce restart edildi, tekrar denemeden önce bekle
+
+            age_desc = "hiç oluşmadı" if age_s is None else f"{age_s:.0f}s'dir güncellemiyor"
+            print(
+                f"[WATCHDOG] ❌ {rel_path} ({target}) {age_desc} (limit={max_age_s}s), restart ediliyor",
+                flush=True,
+            )
+            last_watchdog_restart[target] = now
+
+            if service_name:
+                # Supervisor'ın yönetmediği ayrı bir systemd servisi (örn. Layer-0 websocket)
+                rc = os.system(f"systemctl restart {service_name}")
+                print(f"[WATCHDOG] ▶ systemctl restart {service_name} (rc={rc})", flush=True)
+                continue
+
+            # Supervisor içindeki asyncio task'ını cancel edip yeniden oluştur
+            old_task = tasks.get(module_name)
+            if old_task is not None and not old_task.done():
+                old_task.cancel()
+                try:
+                    await old_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            await asyncio.sleep(5)
+
+            candidate_funcs = ENGINE_FUNCS.get(module_name, ["run_live", "main"])
+            new_task = asyncio.create_task(
+                run_engine_with_restart(module_name, candidate_funcs),
+                name=module_name,
+            )
+            tasks[module_name] = new_task
+            print(f"[WATCHDOG] ✓ {module_name} task'ı yeniden oluşturuldu", flush=True)
+
 async def memory_monitor() -> None:
     """Periodically log memory usage."""
     while not HALT_FILE.exists():
@@ -163,6 +250,11 @@ async def main() -> None:
     # Add memory monitor task
     monitor_task = asyncio.create_task(memory_monitor(), name="memory-monitor")
     tasks["memory-monitor"] = monitor_task
+
+    # Add watchdog health-check task
+    watchdog_task = asyncio.create_task(watchdog_health_check(), name="watchdog")
+    tasks["watchdog"] = watchdog_task
+    print(f"[SUPERVISOR] ▶ watchdog başlatıldı (her {WATCHDOG_INTERVAL_S}s kontrol)", flush=True)
 
     # Create tasks for each engine with staggered startup
     for idx, (module_name, candidate_funcs) in enumerate(ENGINES):
