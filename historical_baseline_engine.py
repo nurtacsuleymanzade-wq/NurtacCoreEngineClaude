@@ -710,7 +710,7 @@ async def run_live() -> None:
     loop = asyncio.get_event_loop()
     for tf, path in SOURCE_FILES.items():
         state         = TimeframeState(tf, path)
-        records, pos  = await loop.run_in_executor(None, _read_all_lines, path)
+        records, pos  = await loop.run_in_executor(None, _read_last_n_lines, path, 200)
         for raw in records:
             state.ingest(raw)
         if records:
