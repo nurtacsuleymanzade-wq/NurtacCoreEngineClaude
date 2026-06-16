@@ -28,7 +28,6 @@ HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 # Engines listesi: (module_name, [candidate_function_names])
 # Supervisor, first available function'ı kullanır
 ENGINES = [
-    ("main", ["run_layer0", "run_live", "main"]),
     ("rolling_window_engine", ["run_layer1", "run_live", "main"]),
     ("aligned_candle_engine", ["run_layer2", "run_live", "main"]),
     ("historical_baseline_engine", ["run_baseline", "run_live", "main"]),
