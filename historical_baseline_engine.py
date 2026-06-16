@@ -583,6 +583,52 @@ def _print_summary(obj: dict) -> None:
 
 
 # ── Shared: read all lines from a file ────────────────────────────────────────
+
+def _read_last_n_lines(path: str, n: int = 200) -> tuple[list[dict], int]:
+    from collections import deque
+    if not os.path.exists(path):
+        return [], 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            lines = list(deque(fh, maxlen=n))
+        records = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+        return records, pos
+    except Exception:
+        return [], 0
+
+
+def _read_last_n_lines(path: str, n: int = 200) -> tuple[list[dict], int]:
+    from collections import deque
+    if not os.path.exists(path):
+        return [], 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            lines = list(deque(fh, maxlen=n))
+        records = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+        return records, pos
+    except Exception:
+        return [], 0
+
 def _read_all_lines(path: str) -> tuple[list[dict], int]:
     """Return (records, byte_position_after_last_line)."""
     if not os.path.exists(path):
