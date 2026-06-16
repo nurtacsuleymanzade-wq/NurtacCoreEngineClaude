@@ -986,9 +986,9 @@ def try_generate_setup(
     nl_tc = {
         "S1_dominant_side": dominant == "long",
         "S2_min_score":     ls >= MIN_LONG_SCORE_NORMAL,
-        "S3_gate_grade":    gate_grade in ("A", "B"),
+        "S3_gate_grade":    gate_grade in ("A", "B", "C"),
         "S4_1s_trend":      trend_1s in ("uptrend", "ranging"),
-        "S5_bos_or_1m_trend": (micro_bos == "bullish" or trend_1m == "uptrend"),
+        "S5_bos_or_1m_trend": (micro_bos == "bullish" or trend_1m == "uptrend" or trend_1s != "downtrend"),
         "S6_ob_or_fvg":     S6_long,
         "S7_not_counter_trend": S7_long,
     }
@@ -1009,9 +1009,9 @@ def try_generate_setup(
     ns_tc = {
         "S1_dominant_side":     dominant == "short",
         "S2_min_score":         ss >= MIN_LONG_SCORE_NORMAL,
-        "S3_gate_grade":        gate_grade in ("A", "B"),
+        "S3_gate_grade":        gate_grade in ("A", "B", "C"),
         "S4_1s_trend":          trend_1s in ("downtrend", "ranging"),
-        "S5_bos_or_1m_trend":   (micro_bos_s == "bearish" or trend_1m == "downtrend"),
+        "S5_bos_or_1m_trend":   (micro_bos_s == "bearish" or trend_1m == "downtrend" or trend_1s != "uptrend"),
         "S6_ob_or_fvg":         S6_short,
         "S7_not_counter_trend": S7_short,
     }
