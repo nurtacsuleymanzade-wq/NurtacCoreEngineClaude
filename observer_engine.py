@@ -959,7 +959,11 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
         await asyncio.sleep(1.0)
 
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        # Warm-up backlog'u thread pool'da oku — büyük dosyalarda event loop'u
+        # bloke etmesin (tüm diğer engine task'ları o süre boyunca donar).
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if not line:
                 continue
@@ -997,7 +1001,10 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     with open(BASELINE_FILE, "r", encoding="utf-8") as f:
-        for line in f:
+        # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if not line:
                 continue
@@ -1034,8 +1041,8 @@ async def _tail_setups(ctx: LiveCtx, obs_fh) -> None:
 
     with open(SETUPS_FILE, "r", encoding="utf-8") as f:
         # Read existing setups (already processed before live started — skip)
-        for line in f:
-            pass  # fast-forward
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, f.readlines)  # fast-forward, thread pool'da
 
         while True:
             if HALT_FILE.exists():
@@ -1062,7 +1069,9 @@ async def _primary_task(ctx: LiveCtx) -> None:
             return
         await asyncio.sleep(1.0)
 
-    existing = _read_last_n_jsonl(PRIMARY_FILE, 100)
+    # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
+    loop = asyncio.get_event_loop()
+    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 100)
     print(f"[OBS] Warm-up: {len(existing)} existing primary records", flush=True)
 
     with (open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh,
@@ -1151,8 +1160,8 @@ async def run_live() -> None:
         with open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh:
             obs_fh_holder.append(obs_fh)
             with open(SETUPS_FILE, "r", encoding="utf-8") as f:
-                for _ in f:
-                    pass  # skip existing
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, f.readlines)  # skip existing, thread pool'da
                 while True:
                     if HALT_FILE.exists():
                         return

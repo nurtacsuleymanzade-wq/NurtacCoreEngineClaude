@@ -1141,7 +1141,12 @@ async def _tail_secondary_file(
     f = open(path, "r", encoding="utf-8")
     inode = os.fstat(f.fileno()).st_ino
     try:
-        for line in f:
+        # Warm-up backlog'u (dosyadaki mevcut tüm satırlar) ana thread'i bloke
+        # etmeden thread pool'da oku — büyük dosyalarda (örn. historical_baseline_dna,
+        # 90MB+) event loop'u uzun süre dondurmasın.
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if not line:
                 continue
@@ -1196,7 +1201,10 @@ async def _primary_task(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     # Warm-up: skip existing records (process but don't write)
-    primary_existing = _read_last_n_jsonl(PRIMARY_FILE, 300)
+    # _read_last_n_jsonl tüm dosyayı satır satır tarar — thread pool'da çalıştır
+    # ki event loop'u bloke etmesin.
+    loop = asyncio.get_event_loop()
+    primary_existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 300)
     print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
 
     ev_fh = open(EVIDENCE_FILE, "a", encoding="utf-8")

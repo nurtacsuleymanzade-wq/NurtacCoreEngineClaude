@@ -704,9 +704,13 @@ async def run_live() -> None:
     states: dict[str, TimeframeState] = {}
     positions: dict[str, int]         = {}
 
+    # _read_all_lines büyük dosyaları (yüzlerce MB) tamamen senkron okuyor.
+    # Ana thread'de çalıştırılırsa asyncio event loop'u uzun süre (gözlemlenen: ~86s)
+    # bloke eder ve watchdog dahil tüm diğer engine'ler donar. Thread pool'a taşı.
+    loop = asyncio.get_event_loop()
     for tf, path in SOURCE_FILES.items():
         state         = TimeframeState(tf, path)
-        records, pos  = _read_all_lines(path)
+        records, pos  = await loop.run_in_executor(None, _read_all_lines, path)
         for raw in records:
             state.ingest(raw)
         if records:

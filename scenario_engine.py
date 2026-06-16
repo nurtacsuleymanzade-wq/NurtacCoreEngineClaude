@@ -910,7 +910,11 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
         await asyncio.sleep(1.0)
 
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        # Warm-up backlog'u thread pool'da oku — büyük dosyalarda event loop'u
+        # bloke etmesin (tüm diğer engine task'ları o süre boyunca donar).
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if not line:
                 continue
@@ -947,7 +951,10 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     with open(BASELINE_FILE, "r", encoding="utf-8") as f:
-        for line in f:
+        # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if not line:
                 continue
@@ -982,7 +989,9 @@ async def _tail_bias(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     with open(BIAS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
+        loop = asyncio.get_event_loop()
+        backlog = await loop.run_in_executor(None, f.readlines)
+        for line in backlog:
             line = line.strip()
             if line:
                 try:
@@ -1011,7 +1020,9 @@ async def _primary_task(ctx: LiveCtx) -> None:
             return
         await asyncio.sleep(1.0)
 
-    existing = _read_last_n_jsonl(PRIMARY_FILE, 3600)
+    # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
+    loop = asyncio.get_event_loop()
+    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 3600)
     print(f"[SCEN] Warm-up: {len(existing)} existing primary records", flush=True)
 
     _trim_counter = [0]
