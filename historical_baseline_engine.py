@@ -610,7 +610,7 @@ def run_batch() -> None:
     print()
 
     for tf, path in SOURCE_FILES.items():
-        records, _ = _read_all_lines(path)
+        records, _ = _read_last_n_lines(path, 200)
         if not records:
             print(f"[{tf}] No records in {path} — skipped")
             continue
