@@ -37,6 +37,7 @@ EVIDENCE_FILE   = DATA_DIR / "evidence_stream.jsonl"
 SETUPS_FILE     = DATA_DIR / "setups.jsonl"
 BIAS_CTX_FILE   = DATA_DIR / "bias_context.jsonl"
 VOL_PROFILE_1M  = DATA_DIR / "volume_profile_1m.jsonl"
+EDGE_MATRIX_FILE = DATA_DIR / "edge_matrix.jsonl"
 
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
@@ -53,6 +54,9 @@ DETECTOR_FILES = {
     "trapped_trader":  DATA_DIR / "labels_trapped_trader.jsonl",
     "iceberg":         DATA_DIR / "labels_iceberg.jsonl",
 }
+
+EDGE_BONUS_STRONG   = 1.0   # added to a detector's score bucket when edge_matrix says "strong"
+EDGE_PENALTY_NEGATIVE = 1.0 # subtracted when edge_matrix says "negative"
 
 MIN_LONG_SCORE_NORMAL = 8.0
 MIN_LONG_SCORE_FLASH  = 12.0
@@ -149,6 +153,60 @@ def _read_bias_context() -> tuple[str, float]:
     except Exception:
         return "neutral", 0.0
 
+def _read_edge_matrix() -> dict:
+    """Read the single-line edge_matrix.jsonl snapshot written by
+    edge_matrix_engine.py. Returns {} if missing/empty/invalid —
+    callers must treat a missing edge_matrix as "no adjustment"."""
+    if not EDGE_MATRIX_FILE.exists():
+        return {}
+    try:
+        last_line = ""
+        with open(EDGE_MATRIX_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if not last_line:
+            return {}
+        data = json.loads(last_line)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+# Detector direction string -> which side of the market that signal pertains to.
+# Mirrors historical_outcome_engine._SIDE_MAP so edge_matrix keys line up
+# exactly with what was recorded for each (event_type, side) combination.
+_DETECTOR_SIDE_MAP: dict[str, str] = {
+    "sell_absorbed":   "sell",
+    "downward_sweep":  "sell",
+    "sell_exhaustion": "sell",
+    "ask_iceberg":     "sell",
+    "long_trapped":    "sell",
+    "sell_initiative": "sell",
+    "buy_absorbed":    "buy",
+    "upward_sweep":    "buy",
+    "buy_exhaustion":  "buy",
+    "bid_iceberg":     "buy",
+    "short_trapped":   "buy",
+    "buy_initiative":  "buy",
+}
+
+def _edge_adjustment(edge_matrix: dict, event_type: str, direction: str | None) -> float:
+    """Look up edge_matrix[f'{event_type}_{side}'] and return the score
+    adjustment: +EDGE_BONUS_STRONG for "strong" edge, -EDGE_PENALTY_NEGATIVE
+    for "negative" edge, 0.0 otherwise (moderate/neutral/unknown/missing)."""
+    side = _DETECTOR_SIDE_MAP.get(direction or "")
+    if not side or not edge_matrix:
+        return 0.0
+    entry = edge_matrix.get(f"{event_type}_{side}")
+    if not entry:
+        return 0.0
+    edge = entry.get("edge")
+    if edge == "strong":
+        return EDGE_BONUS_STRONG
+    if edge == "negative":
+        return -EDGE_PENALTY_NEGATIVE
+    return 0.0
+
 def _build_exact_index(records: list[dict]) -> dict[int, dict]:
     """Index records by window_start_ts. Latest record wins on duplicate ts."""
     idx: dict[int, dict] = {}
@@ -181,8 +239,20 @@ class SetupState:
         self.emitted_ids: set[str] = set()
 
 # ── Evidence computation ───────────────────────────────────────────────────────────
-def _score_detectors(det_recs: dict[str, dict | None]) -> tuple[float, float, dict]:
-    """Compute detector contribution to long/short scores."""
+def _score_detectors(
+    det_recs: dict[str, dict | None],
+    edge_matrix: dict | None = None,
+) -> tuple[float, float, dict]:
+    """Compute detector contribution to long/short scores.
+
+    edge_matrix (from edge_matrix_engine.py / data/edge_matrix.jsonl) is
+    consulted per detector signal: when the historical 60s win rate for
+    that exact (event_type, side) is "strong", +EDGE_BONUS_STRONG is added
+    to whichever score bucket the signal feeds; when "negative",
+    -EDGE_PENALTY_NEGATIVE is applied instead. This is how the system
+    learns from its own track record over time.
+    """
+    edge_matrix = edge_matrix or {}
     long_add  = 0.0
     short_add = 0.0
     comps: dict[str, dict] = {}
@@ -200,61 +270,66 @@ def _score_detectors(det_recs: dict[str, dict | None]) -> tuple[float, float, di
     rec = det_recs.get("absorption")
     lbl = (rec or {}).get("label", "none")
     drn = (rec or {}).get("direction")
+    edge_adj = _edge_adjustment(edge_matrix, "absorption", drn)
     if drn == "sell_absorbed":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        long_add += v + edge_adj
     elif drn == "buy_absorbed":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
-    comps["absorption"] = {"label": lbl, "direction": drn}
+        short_add += v + edge_adj
+    comps["absorption"] = {"label": lbl, "direction": drn, "edge_adjustment": edge_adj}
 
     # Sweep
     rec = det_recs.get("sweep")
     lbl = (rec or {}).get("label", "none")
     drn = (rec or {}).get("direction")
+    edge_adj = _edge_adjustment(edge_matrix, "sweep", drn)
     if drn == "downward_sweep":
         v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        long_add += v + edge_adj
     elif drn == "upward_sweep":
         v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
-    comps["sweep"] = {"label": lbl, "direction": drn}
+        short_add += v + edge_adj
+    comps["sweep"] = {"label": lbl, "direction": drn, "edge_adjustment": edge_adj}
 
     # Exhaustion
     rec = det_recs.get("exhaustion")
     lbl = (rec or {}).get("label", "none")
     drn = (rec or {}).get("direction")
+    edge_adj = _edge_adjustment(edge_matrix, "exhaustion", drn)
     if drn == "sell_exhaustion":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        long_add += v + edge_adj
     elif drn == "buy_exhaustion":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
-    comps["exhaustion"] = {"label": lbl, "direction": drn}
+        short_add += v + edge_adj
+    comps["exhaustion"] = {"label": lbl, "direction": drn, "edge_adjustment": edge_adj}
 
     # Initiative flow
     rec = det_recs.get("initiative_flow")
     lbl = (rec or {}).get("label", "none")
     drn = (rec or {}).get("direction")
+    edge_adj = _edge_adjustment(edge_matrix, "initiative_flow", drn)
     if drn == "buy_initiative":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        long_add += v + edge_adj
     elif drn == "sell_initiative":
         v = 2.0 if lbl and "strong" in lbl else (1.0 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
-    comps["initiative_flow"] = {"label": lbl, "direction": drn}
+        short_add += v + edge_adj
+    comps["initiative_flow"] = {"label": lbl, "direction": drn, "edge_adjustment": edge_adj}
 
     # Trapped trader
     rec = det_recs.get("trapped_trader")
     lbl = (rec or {}).get("label", "none")
     drn = (rec or {}).get("direction")
+    edge_adj = _edge_adjustment(edge_matrix, "trapped_trader", drn)
     if drn == "short_trapped":
         v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        long_add += v + edge_adj
     elif drn == "long_trapped":
         v = 1.5 if lbl and "strong" in lbl else (0.75 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
-    comps["trapped_trader"] = {"label": lbl, "direction": drn}
+        short_add += v + edge_adj
+    comps["trapped_trader"] = {"label": lbl, "direction": drn, "edge_adjustment": edge_adj}
 
     # Iceberg — constraint: only counts if at least 1 other bullish/bearish detector fires
     rec = det_recs.get("iceberg")
@@ -280,15 +355,21 @@ def _score_detectors(det_recs: dict[str, dict | None]) -> tuple[float, float, di
         if (det_recs.get(d) or {}).get("direction") == expected_dir
     )
     iceberg_counted = False
+    edge_adj = 0.0
     if drn == "bid_iceberg" and other_bull >= 1:
         v = 1.0 if lbl and "strong" in lbl else (0.5 if lbl and "candidate" in lbl else 0.0)
-        long_add += v
+        edge_adj = _edge_adjustment(edge_matrix, "iceberg", drn)
+        long_add += v + edge_adj
         iceberg_counted = v > 0
     elif drn == "ask_iceberg" and other_bear >= 1:
         v = 1.0 if lbl and "strong" in lbl else (0.5 if lbl and "candidate" in lbl else 0.0)
-        short_add += v
+        edge_adj = _edge_adjustment(edge_matrix, "iceberg", drn)
+        short_add += v + edge_adj
         iceberg_counted = v > 0
-    comps["iceberg"] = {"label": lbl, "direction": drn, "iceberg_counted": iceberg_counted}
+    comps["iceberg"] = {
+        "label": lbl, "direction": drn,
+        "iceberg_counted": iceberg_counted, "edge_adjustment": edge_adj,
+    }
 
     return long_add, short_add, comps
 
@@ -305,8 +386,10 @@ def compute_evidence(
     long_score  = 0.0
     short_score = 0.0
     comps: dict[str, dict] = {}
+    score_breakdown: dict[str, float] = {}
 
     # ── A. Candle DNA ─────────────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     cdna = primary.get("candle_dna") or {}
     ddna = primary.get("depth_dna") or {}
     delta        = _sf(cdna.get("delta"), 0.0)
@@ -337,8 +420,12 @@ def compute_evidence(
         "depth_bid_dominant":   d_bid,
         "depth_ask_dominant":   d_ask,
     }
+    score_breakdown["A_candle_dna"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── B. Gate ───────────────────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     gate_grade = None
     gate_dir   = None
     g_comp: dict[str, bool] = {}
@@ -355,8 +442,12 @@ def compute_evidence(
     g_comp["grade"]     = gate_grade
     g_comp["direction"] = gate_dir
     comps["gate"] = g_comp
+    score_breakdown["B_gate"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── C. Smart Money ────────────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     # 1S structure
     s1s_trend = (s1s or {}).get("trend") or {}
     s1s_bos   = (s1s or {}).get("bos") or {}
@@ -415,14 +506,23 @@ def compute_evidence(
     if sm5m["trend_uptrend_5m"]:  long_score  += 1.0
     if sm5m["trend_downtrend_5m"]: short_score += 1.0
     comps["smart_money_5m"] = sm5m
+    score_breakdown["C_smart_money"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── D. Detectors ──────────────────────────────────────────────────────────────
-    det_long, det_short, det_comps = _score_detectors(det_recs)
+    _pre_long, _pre_short = long_score, short_score
+    edge_matrix = _read_edge_matrix()
+    det_long, det_short, det_comps = _score_detectors(det_recs, edge_matrix)
     long_score  += det_long
     short_score += det_short
     comps["detectors"] = det_comps
+    score_breakdown["D_detector"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── E. Baseline ───────────────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     bl1m      = None
     bl_vwap   = None
     bl_cvd    = None
@@ -449,8 +549,12 @@ def compute_evidence(
     if bl_comp["atr_extreme_high"]:
         long_score  *= 0.85
         short_score *= 0.85
+    score_breakdown["E_baseline"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── F. Market Context Bias ────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     bias_dom, bias_gap_val = _read_bias_context()
     mc_long  = 0.0
     mc_short = 0.0
@@ -466,8 +570,12 @@ def compute_evidence(
         "long_contribution":  mc_long,
         "short_contribution": mc_short,
     }
+    score_breakdown["F_market_context"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── G. Volume Profile Bias ────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     vp_rec = _read_vol_profile_1m()
     vp_long  = 0.0
     vp_short = 0.0
@@ -507,8 +615,12 @@ def compute_evidence(
     long_score  += vp_long
     short_score += vp_short
     comps["volume_profile_bias"] = vp_comp
+    score_breakdown["G_volume_profile"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # ── H. Scenario Bias ──────────────────────────────────────────────────────
+    _pre_long, _pre_short = long_score, short_score
     sc_long  = 0.0
     sc_short = 0.0
     sc_comp: dict = {"available": False}
@@ -567,6 +679,9 @@ def compute_evidence(
     long_score  += sc_long
     short_score += sc_short
     comps["scenario_bias"] = sc_comp
+    score_breakdown["H_scenario"] = round(
+        (long_score - _pre_long) - (short_score - _pre_short), 4
+    )
 
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
@@ -593,6 +708,7 @@ def compute_evidence(
         "short_score":     round(short_score, 4),
         "dominant_side":   dominant,
         "score_gap":       round(score_gap, 4),
+        "score_breakdown": score_breakdown,
         "evidence_components": comps,
         "data_sources_available": {
             "gate":        gate is not None,
@@ -803,6 +919,7 @@ def try_generate_setup(
                 "short_score": round(ss, 4),
                 "score_gap":   round(ev["score_gap"], 4),
             },
+            "score_breakdown": ev.get("score_breakdown", {}),
             "context": {
                 "gate_grade":      gate_grade,
                 "micro_bos":       micro_bos,
