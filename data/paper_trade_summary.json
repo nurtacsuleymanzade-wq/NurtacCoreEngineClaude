@@ -1,0 +1,34 @@
+{
+  "engine": "paper_trade_engine",
+  "symbol": "BTCUSDT",
+  "generated_at": 1781576718.408359,
+  "total": {
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "breakevens": 0,
+    "timeouts": 0,
+    "win_rate": 0.0,
+    "avg_pnl_r": 0.0,
+    "total_pnl_r": 0.0,
+    "avg_duration_seconds": 0.0,
+    "max_win_r": 0.0,
+    "max_loss_r": 0.0,
+    "profit_factor": null
+  },
+  "by_direction": {},
+  "by_setup_type": {},
+  "by_timeframe": {},
+  "by_scenario": {},
+  "by_gate_grade": {},
+  "by_close_reason": {},
+  "current_open_trades": 0,
+  "consecutive_wins": 0,
+  "consecutive_losses": 0,
+  "max_consecutive_wins": 0,
+  "max_consecutive_losses": 0,
+  "scores": {
+    "confidence": null,
+    "edge_score": null
+  }
+}

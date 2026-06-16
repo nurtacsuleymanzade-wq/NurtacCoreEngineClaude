@@ -164,20 +164,35 @@ def get_matching_15s_window(ts: int) -> dict | None:
     return best
 
 
-def _read_all_lines(path: Path) -> tuple[list[dict], int]:
+def _read_last_n_lines(path: Path, n: int = 200) -> tuple[list[dict], int]:
     if not path.exists():
         return [], 0
-    records: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-            return records, fh.tell()
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+            remaining = pos
+            chunks: list[bytes] = []
+            line_count = 0
+            block_size = 64 * 1024
+
+            while remaining > 0 and line_count <= n:
+                read_size = min(block_size, remaining)
+                remaining -= read_size
+                fh.seek(remaining)
+                chunk = fh.read(read_size)
+                chunks.insert(0, chunk)
+                line_count += chunk.count(b"\n")
+
+        records: list[dict] = []
+        for raw_line in b"".join(chunks).splitlines()[-n:]:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        return records, pos
     except OSError:
         return [], 0
 
@@ -935,20 +950,20 @@ def run_batch() -> None:
     _load_baselines()
 
     # Pre-fill cross-reference buffers
-    recs_5s, _ = _read_all_lines(INPUT_5S)
+    recs_5s, _ = _read_last_n_lines(INPUT_5S)
     if not recs_5s:
         print(f"Waiting for {INPUT_5S}...")
     for r in recs_5s:
         _buf_5s.append(r)
 
-    recs_15s, _ = _read_all_lines(INPUT_15S)
+    recs_15s, _ = _read_last_n_lines(INPUT_15S)
     if not recs_15s:
         print(f"Waiting for {INPUT_15S}...")
     for r in recs_15s:
         _buf_15s.append(r)
 
     # ── 1S-based detectors (absorption, sweep, iceberg) ──
-    recs_1s, _ = _read_all_lines(INPUT_1S)
+    recs_1s, _ = _read_last_n_lines(INPUT_1S)
     if not recs_1s:
         print(f"Waiting for {INPUT_1S}...")
 
@@ -991,7 +1006,7 @@ def run_batch() -> None:
             print(f"[{det.upper()}] no valid output produced")
 
     # ── 3S-based detectors (exhaustion, trapped_trader) ──
-    recs_3s, _ = _read_all_lines(INPUT_3S)
+    recs_3s, _ = _read_last_n_lines(INPUT_3S)
     if not recs_3s:
         print(f"Waiting for {INPUT_3S}...")
 
@@ -1070,7 +1085,7 @@ async def _tail_file(path: Path, start_pos: int):
 
 
 async def _task_absorption() -> None:
-    recs, pos = _read_all_lines(INPUT_1S)
+    recs, pos = _read_last_n_lines(INPUT_1S)
     for row in recs:
         _check_halt()
         rec  = _detect_absorption(row)
@@ -1091,7 +1106,7 @@ async def _task_absorption() -> None:
 
 
 async def _task_sweep() -> None:
-    recs, pos = _read_all_lines(INPUT_1S)
+    recs, pos = _read_last_n_lines(INPUT_1S)
     for row in recs:
         _check_halt()
         rec  = _detect_sweep(row)
@@ -1113,7 +1128,7 @@ async def _task_sweep() -> None:
 
 async def _task_iceberg() -> None:
     buf: deque[dict] = deque(maxlen=5)
-    recs, pos = _read_all_lines(INPUT_1S)
+    recs, pos = _read_last_n_lines(INPUT_1S)
     for row in recs:
         _check_halt()
         buf.append(row)
@@ -1136,7 +1151,7 @@ async def _task_iceberg() -> None:
 
 
 async def _task_exhaustion() -> None:
-    recs, pos = _read_all_lines(INPUT_3S)
+    recs, pos = _read_last_n_lines(INPUT_3S)
     for row in recs:
         _check_halt()
         rec  = _detect_exhaustion(row)
@@ -1157,7 +1172,7 @@ async def _task_exhaustion() -> None:
 
 
 async def _task_trapped_trader() -> None:
-    recs, pos = _read_all_lines(INPUT_3S)
+    recs, pos = _read_last_n_lines(INPUT_3S)
     for row in recs:
         _check_halt()
         rec  = _detect_trapped_trader(row)
@@ -1178,7 +1193,7 @@ async def _task_trapped_trader() -> None:
 
 
 async def _task_initiative_flow() -> None:
-    recs, pos = _read_all_lines(INPUT_5S)
+    recs, pos = _read_last_n_lines(INPUT_5S)
     for row in recs:
         _check_halt()
         _buf_5s.append(row)
@@ -1201,7 +1216,7 @@ async def _task_initiative_flow() -> None:
 
 
 async def _task_15s_buffer() -> None:
-    recs, pos = _read_all_lines(INPUT_15S)
+    recs, pos = _read_last_n_lines(INPUT_15S)
     for row in recs:
         _buf_15s.append(row)
     async for row in _tail_file(INPUT_15S, pos):
@@ -1223,9 +1238,9 @@ async def run_live() -> None:
     _load_baselines()
 
     # Seed 5S/15S buffers before detectors start
-    for r in _read_all_lines(INPUT_5S)[0]:
+    for r in _read_last_n_lines(INPUT_5S)[0]:
         _buf_5s.append(r)
-    for r in _read_all_lines(INPUT_15S)[0]:
+    for r in _read_last_n_lines(INPUT_15S)[0]:
         _buf_15s.append(r)
 
     print("Warm-up complete. Starting 6 detector tasks + helpers...")

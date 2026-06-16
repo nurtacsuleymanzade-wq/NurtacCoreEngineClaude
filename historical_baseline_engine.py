@@ -46,7 +46,7 @@ SOURCE_FILES: dict[str, str] = {
     "1D":  os.path.join(DATA_DIR, "aligned_1d_candle_dna.jsonl"),
 }
 
-BASELINE_WINDOWS: dict[str, int] = {"short": 20, "medium": 100, "long": 500}
+BASELINE_WINDOWS: dict[str, int] = {"short": 20, "medium": 100, "long": 200}
 ATR_PERIOD   = 14
 MS_PER_DAY   = 86_400_000
 
@@ -649,7 +649,7 @@ async def _tail_follow(
         await asyncio.sleep(FILE_WAIT_SLEEP)
 
     with open(path, "r", encoding="utf-8") as fh:
-        fh.seek(start_pos)
+        fh.seek(0, 2)  # Always start from real EOF
         while True:
             if os.path.exists(HALT_FILE):
                 print(f"[{tf}] SYSTEM_HALT detected, stopping task.")

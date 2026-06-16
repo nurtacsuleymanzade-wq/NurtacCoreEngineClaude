@@ -80,7 +80,7 @@ def _read_last_line(path: Path) -> dict | None:
     except Exception:
         return None
 
-def _read_all_jsonl(path: Path) -> list[dict]:
+def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     if not path.exists():
         return []
     records: list[dict] = []

@@ -79,7 +79,7 @@ def _utc_day_start_ms() -> int:
     import calendar
     return int(calendar.timegm((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, 0)) * 1000)
 
-def _read_all_jsonl(path: Path) -> list[dict]:
+def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     if not path.exists():
         return []
     records = []
@@ -857,7 +857,7 @@ def _save_memory(memory_type: str, price: float, strength: float,
 
 def _load_prev_session_poc() -> float | None:
     """Return the most recent session_poc from volume_memory.jsonl."""
-    recs = _read_all_jsonl(OUT_MEMORY)
+    recs = _read_last_n_lines(OUT_MEMORY, 200)
     for rec in reversed(recs):
         if rec.get("memory_type") == "session_poc":
             return _sf(rec.get("price")) or None

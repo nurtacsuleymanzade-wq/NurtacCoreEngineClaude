@@ -70,7 +70,7 @@ def _sf(v, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-def _read_all_jsonl(path: Path) -> list[dict]:
+def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     if not path.exists():
         return []
     records: list[dict] = []
@@ -1062,7 +1062,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             return
         await asyncio.sleep(1.0)
 
-    existing = _read_last_n_jsonl(PRIMARY_FILE, 3600)
+    existing = _read_last_n_jsonl(PRIMARY_FILE, 100)
     print(f"[OBS] Warm-up: {len(existing)} existing primary records", flush=True)
 
     with (open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh,

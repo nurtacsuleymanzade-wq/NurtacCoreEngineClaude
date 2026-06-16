@@ -760,30 +760,44 @@ def _parse_line(tf: str, raw: dict) -> Bar | None:
         return _parse_1s(raw)
     return _parse_aligned(raw)
 
-def _read_all_lines(path: Path) -> list[dict]:
-    """Read all valid JSON lines from a JSONL file."""
-    records: list[dict] = []
+def _read_last_n_lines(path: Path, n: int = 200) -> list[dict]:
+    """Read only the last N valid JSONL records from a file."""
     if not path.exists():
-        return records
+        return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            remaining = f.tell()
+            chunks: list[bytes] = []
+            line_count = 0
+            block_size = 64 * 1024
+
+            while remaining > 0 and line_count <= n:
+                read_size = min(block_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                chunk = f.read(read_size)
+                chunks.insert(0, chunk)
+                line_count += chunk.count(b"\n")
+
+        records: list[dict] = []
+        for raw_line in b"".join(chunks).splitlines()[-n:]:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                pass
+        return records
     except OSError:
-        pass
-    return records
+        return []
 
 # ── Batch mode ────────────────────────────────────────────────────────────────────
 def _run_batch_tf(tf: str, in_path: Path, out_path: Path,
                   baseline_atr: float) -> None:
     print(f"[SME][{tf}] Batch mode: reading {in_path}", flush=True)
-    records = _read_all_lines(in_path)
+    records = _read_last_n_lines(in_path)
     if not records:
         print(f"[SME][{tf}] No data in {in_path}", flush=True)
         return
@@ -866,7 +880,7 @@ async def _live_tf_task(tf: str, in_path: Path, out_path: Path,
     state = TFState(tf, baseline_atr)
 
     # Warm-up: process existing data (do NOT write to output)
-    existing = _read_all_lines(in_path)
+    existing = _read_last_n_lines(in_path)
     print(f"[SME][{tf}] Warm-up: {len(existing)} existing records", flush=True)
     for raw in existing:
         bar = _parse_line(tf, raw)
@@ -965,3 +979,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+async def run_live():
+    import asyncio
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, main)

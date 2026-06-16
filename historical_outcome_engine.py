@@ -98,7 +98,7 @@ def _sf(v, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-def _read_all_jsonl(path: Path) -> list[dict]:
+def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     if not path.exists():
         return []
     records: list[dict] = []
@@ -945,7 +945,7 @@ def restore_open_positions(state: EngineState) -> int:
 def load_processed_ids(state: EngineState) -> int:
     """Re-read observations file to rebuild processed_ids set."""
     n = 0
-    for rec in _read_all_jsonl(OBS_FILE):
+    for rec in _read_last_n_jsonl(OBS_FILE, maxlen=500):
         eid = rec.get("event_id")
         if eid:
             state.processed_ids.add(eid)

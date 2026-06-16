@@ -99,20 +99,35 @@ def _load_baseline() -> None:
         pass
 
 
-def _read_all_lines(path: Path) -> tuple[list[dict], int]:
+def _read_last_n_lines(path: Path, n: int = 200) -> tuple[list[dict], int]:
     if not path.exists():
         return [], 0
-    records: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-            return records, fh.tell()
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+            remaining = pos
+            chunks: list[bytes] = []
+            line_count = 0
+            block_size = 64 * 1024
+
+            while remaining > 0 and line_count <= n:
+                read_size = min(block_size, remaining)
+                remaining -= read_size
+                fh.seek(remaining)
+                chunk = fh.read(read_size)
+                chunks.insert(0, chunk)
+                line_count += chunk.count(b"\n")
+
+        records: list[dict] = []
+        for raw_line in b"".join(chunks).splitlines()[-n:]:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        return records, pos
     except OSError:
         return [], 0
 
@@ -410,7 +425,7 @@ def run_batch() -> None:
         if not path.exists():
             print(f"[{det}] file not found — skipped")
             continue
-        records, _ = _read_all_lines(path)
+        records, _ = _read_last_n_lines(path)
         for rec in records:
             _check_halt()
             ts = rec.get("window_start_ts")
@@ -455,7 +470,7 @@ async def _tail_label_file(detector: str) -> None:
         await asyncio.sleep(FILE_WAIT_SLEEP)
 
     # warm-up: read existing
-    records, pos = _read_all_lines(path)
+    records, pos = _read_last_n_lines(path)
     async with _pending_lock:
         for rec in records:
             ts = rec.get("window_start_ts")

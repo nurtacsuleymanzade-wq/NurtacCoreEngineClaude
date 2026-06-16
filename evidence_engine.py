@@ -75,7 +75,7 @@ def _sf(v, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-def _read_all_jsonl(path: Path) -> list[dict]:
+def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     if not path.exists():
         return []
     records: list[dict] = []
@@ -936,17 +936,17 @@ def _print_setup(setup: dict, ev: dict) -> None:
 def run_batch() -> None:
     print("[EV] Batch mode — loading all input files", flush=True)
 
-    primary_recs = _read_all_jsonl(PRIMARY_FILE)
-    gate_idx     = _build_exact_index(_read_all_jsonl(GATE_FILE))
-    s1s_idx      = _build_exact_index(_read_all_jsonl(STRUCT_1S_FILE))
-    s1m_idx      = _build_exact_index(_read_all_jsonl(STRUCT_1M_FILE))
-    s5m_idx      = _build_exact_index(_read_all_jsonl(STRUCT_5M_FILE))
-    det_idxs     = {d: _build_exact_index(_read_all_jsonl(p))
+    primary_recs = _read_last_n_lines(PRIMARY_FILE, 200)
+    gate_idx     = _build_exact_index(_read_last_n_lines(GATE_FILE, 200))
+    s1s_idx      = _build_exact_index(_read_last_n_lines(STRUCT_1S_FILE, 200))
+    s1m_idx      = _build_exact_index(_read_last_n_lines(STRUCT_1M_FILE, 200))
+    s5m_idx      = _build_exact_index(_read_last_n_lines(STRUCT_5M_FILE, 200))
+    det_idxs     = {d: _build_exact_index(_read_last_n_lines(p, 200))
                     for d, p in DETECTOR_FILES.items()}
 
     # Baseline: latest record per timeframe
     baseline_1m: dict | None = None
-    for rec in _read_all_jsonl(BASELINE_FILE):
+    for rec in _read_last_n_lines(BASELINE_FILE, 200):
         if rec.get("timeframe") == "1M":
             baseline_1m = rec
 
