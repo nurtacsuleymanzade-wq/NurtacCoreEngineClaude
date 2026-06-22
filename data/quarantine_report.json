@@ -1,0 +1,12 @@
+{
+  "run_at": "2026-06-22T21:31:46Z",
+  "input_rows_read": 28,
+  "verified_high_low": 28,
+  "close_only_quarantined": 0,
+  "other_skipped": 0,
+  "clean_file": "/root/NurtacCoreEngineClaude/data/paper_closed_verified.jsonl",
+  "quarantine_file": "/root/NurtacCoreEngineClaude/data/paper_closed_quarantine.jsonl",
+  "expected_verified": 54,
+  "expected_quarantined": 27,
+  "counts_match_expected": false
+}
