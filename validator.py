@@ -67,7 +67,7 @@ THRESHOLDS = {
     "5M":  {"warning": 0.04,  "critical": 0.4},
     "15M": {"warning": 0.03,  "critical": 0.3},
     "1H":  {"warning": 0.02,  "critical": 0.2},
-    "4H":  {"warning": 0.015, "critical": 0.15},
+    "4H":  {"warning": 0.05,  "critical": 0.5},
     "1D":  {"warning": 0.01,  "critical": 0.1},
 }
 
