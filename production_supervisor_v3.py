@@ -33,7 +33,7 @@ def start(name, script):
     # RAM kontrolü — 800MB altındaysa bekle
     avail = get_available_mb()
     waited = 0
-    while avail < 1500 and waited < 120:
+    while avail < 1000 and waited < 120:
         print(f"[SUP] RAM low ({avail}MB), waiting 15s before starting {name}...", flush=True)
         time.sleep(15)
         waited += 15
