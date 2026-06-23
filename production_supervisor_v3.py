@@ -33,15 +33,15 @@ def start(name, script):
     # RAM kontrolü — 800MB altındaysa bekle
     avail = get_available_mb()
     waited = 0
-    while avail < 800 and waited < 60:
-        print(f"[SUP] RAM low ({avail}MB), waiting 10s before starting {name}...", flush=True)
-        time.sleep(10)
-        waited += 10
+    while avail < 1500 and waited < 120:
+        print(f"[SUP] RAM low ({avail}MB), waiting 15s before starting {name}...", flush=True)
+        time.sleep(15)
+        waited += 15
         avail = get_available_mb()
     p = subprocess.Popen([VENV] + script.split(), cwd=str(ROOT))
     procs[name] = p
     print(f"[SUP] {name} started pid={p.pid} (RAM:{avail}MB)", flush=True)
-    time.sleep(5)  # Engine'in başlaması için ekstra bekleme
+    time.sleep(20)  # Engine warm-up için bekle
 
 def shutdown(sig, frame):
     for p in procs.values(): p.terminate()
