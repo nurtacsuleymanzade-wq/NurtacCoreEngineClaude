@@ -1,0 +1,8 @@
+{
+  "checkpoint": "2026-06-23 stabilization complete",
+  "active_services": ["nurtac-layer0", "nurtac-supervisor"],
+  "active_engines": ["main.py", "rolling_window_engine.py", "detector_engine.py", "evidence_engine.py"],
+  "disabled_permanently": ["watchdog", "observer", "validator", "all timers", "ram_lifecycle"],
+  "ram_safe_fixes": ["paper_close_engine tail 5000", "story_context_builder disabled", "supervisor v3 subprocess isolation"],
+  "next_step": "detector + evidence stabil calisinca aligned_candle + historical_baseline ekle"
+}
