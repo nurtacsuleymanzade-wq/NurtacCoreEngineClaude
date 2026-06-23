@@ -986,7 +986,7 @@ def try_generate_setup(
     nl_tc = {
         "S1_dominant_side": dominant == "long",
         "S2_min_score":     ls >= MIN_LONG_SCORE_NORMAL,
-        "S3_gate_grade":    gate_grade in ("A", "B", "C"),
+        "S3_gate_grade":    True,
         "S4_1s_trend":      trend_1s in ("uptrend", "ranging"),
         "S5_bos_or_1m_trend": (micro_bos == "bullish" or trend_1m == "uptrend" or trend_1s != "downtrend"),
         "S6_ob_or_fvg":     S6_long,
@@ -1009,7 +1009,7 @@ def try_generate_setup(
     ns_tc = {
         "S1_dominant_side":     dominant == "short",
         "S2_min_score":         ss >= MIN_LONG_SCORE_NORMAL,
-        "S3_gate_grade":        gate_grade in ("A", "B", "C"),
+        "S3_gate_grade":    True,
         "S4_1s_trend":          trend_1s in ("downtrend", "ranging"),
         "S5_bos_or_1m_trend":   (micro_bos_s == "bearish" or trend_1m == "downtrend" or trend_1s != "uptrend"),
         "S6_ob_or_fvg":         S6_short,
@@ -1081,7 +1081,7 @@ def run_batch() -> None:
             ts = int(ts)
 
             gate    = gate_idx.get(ts)
-            s1s     = s1s_idx.get(ts)
+            s1s     = _get_latest_at_or_before(s1s_idx, ts)
             s1m     = _get_latest_at_or_before(s1m_idx, ts)
             s5m     = _get_latest_at_or_before(s5m_idx, ts)
             det_rec = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
@@ -1145,7 +1145,9 @@ async def _tail_secondary_file(
         # etmeden thread pool'da oku — büyük dosyalarda (örn. historical_baseline_dna,
         # 90MB+) event loop'u uzun süre dondurmasın.
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
+        import subprocess as _sp
+        _raw = await loop.run_in_executor(None, lambda: _sp.getoutput(f"tail -500 {path}"))
+        backlog = [l + "\n" for l in _raw.splitlines()]
         for line in backlog:
             line = line.strip()
             if not line:
@@ -1265,7 +1267,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             ts = int(ts)
 
             gate    = ctx.gate.get(ts)
-            s1s     = ctx.s1s.get(ts)
+            s1s     = _get_latest_at_or_before(ctx.s1s, ts)
             s1m     = _get_latest_at_or_before(ctx.s1m, ts)
             s5m     = _get_latest_at_or_before(ctx.s5m, ts)
             det_rec = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
