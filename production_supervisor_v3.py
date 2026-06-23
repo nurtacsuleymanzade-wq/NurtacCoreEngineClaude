@@ -37,6 +37,9 @@ for name, script in ENGINES:
     time.sleep(3)
 
 print("[SUP] Core engines running", flush=True)
+import subprocess as _sp
+_hp = _sp.Popen([VENV, "tools/health_monitor.py"], cwd=str(ROOT))
+print(f"[SUP] Health monitor pid={_hp.pid}", flush=True)
 
 while True:
     for name, script in ENGINES:
