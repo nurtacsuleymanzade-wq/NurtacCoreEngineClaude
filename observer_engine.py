@@ -89,23 +89,22 @@ def _read_last_n_lines(path, n: int = 200) -> list[dict]:
     return records
 
 def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
-    """Read only last N lines from JSONL file (memory-efficient warm-up)."""
+    """Read only last N lines using tail (truly RAM-safe)."""
+    import subprocess as _sp
     if not path.exists():
         return []
     records: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            last_records = deque(maxlen=maxlen)
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    last_records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-            records = list(last_records)
-    except OSError:
+        raw = _sp.getoutput(f"tail -{maxlen} {path}")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    except Exception:
         pass
     return records
 
