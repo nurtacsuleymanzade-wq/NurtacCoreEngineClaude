@@ -36,14 +36,12 @@ ENGINES = [
     ("smart_money_engine", ["run_smartmoney", "run_live", "main"]),
     ("evidence_engine", ["run_evidence", "run_live", "main"]),
     ("market_context_engine", ["run_context", "run_live", "main"]),
-    ("volume_profile_engine", ["run_volprofile", "run_live", "main"]),
+    # DISABLED_RAM: ("volume_profile_engine", ["run_volprofile", "run_live", "main"]),
     ("scenario_engine", ["run_scenario", "run_live", "main"]),
-    ("observer_engine", ["run_observer", "run_live", "main"]),
-    ("historical_outcome_engine", ["run_outcome", "run_live", "main"]),
-    ("paper_trade_engine", ["run_paper", "run_live", "main"]),
+    # DISABLED_RAM: ("historical_outcome_engine", ["run_outcome", "run_live", "main"]),
     ("telegram_reporter", ["run_reporter", "run_live", "main"]),
-    ("edge_matrix_engine", ["run_edge", "run_live", "main"]),
-    ("final_setup_engine", ["run_final", "run_live", "main"]),
+    # DISABLED_RAM: ("edge_matrix_engine", ["run_edge", "run_live", "main"]),
+    # DISABLED_RAM: ("final_setup_engine", ["run_final", "run_live", "main"]),
 ]
 
 # State
@@ -61,6 +59,8 @@ FILE_HEALTH = [
     ("data/scenarios.jsonl",               120, "scenario_engine", None),
     ("data/labels_absorption.jsonl",       30,  "detector_engine", None),
     ("data/decision_gate_output.jsonl",    30,  "decision_gate",   None),
+    ("data/qualified_setups.jsonl",        180, "paper_trade_engine", None),
+    ("data/setups.jsonl",                  90,  "observer_engine", None),
 ]
 WATCHDOG_INTERVAL_S   = 60
 WATCHDOG_GRACE_S      = 90   # başlangıçta dosyalar henüz oluşmamış olabilir, ilk grace süresi bekle
