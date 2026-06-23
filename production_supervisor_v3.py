@@ -14,7 +14,7 @@ ENGINES = [
     ("rolling_window", "rolling_window_engine.py"),
     ("smart_money", "smart_money_engine.py --mode live"),
     ("aligned_candle", "aligned_candle_engine.py"),
-    ("historical_baseline", "historical_baseline_engine.py --mode live"),
+    # TEMP_DISABLED (1.3GB RAM): ("historical_baseline", "historical_baseline_engine.py --mode live"),
     ("observer", "observer_engine.py --mode live"),
     ("validator", "validator.py"),
     ("market_context", "market_context_engine.py"),
