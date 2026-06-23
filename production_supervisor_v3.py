@@ -12,6 +12,7 @@ VENV = str(ROOT / ".venv/bin/python3")
 # SADECE 3 ENGINE — toplam ~800MB hedef
 ENGINES = [
     ("rolling_window", "rolling_window_engine.py"),
+    ("smart_money", "smart_money_engine.py --mode live"),
     ("aligned_candle", "aligned_candle_engine.py"),
     ("historical_baseline", "historical_baseline_engine.py --mode live"),
     ("observer", "observer_engine.py --mode live"),
