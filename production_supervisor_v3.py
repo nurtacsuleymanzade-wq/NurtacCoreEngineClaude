@@ -19,7 +19,7 @@ ENGINES = [
 procs = {}
 
 def start(name, script):
-    p = subprocess.Popen([VENV, script], cwd=str(ROOT))
+    p = subprocess.Popen([VENV] + script.split(), cwd=str(ROOT))
     procs[name] = p
     print(f"[SUP] {name} started pid={p.pid}", flush=True)
 
