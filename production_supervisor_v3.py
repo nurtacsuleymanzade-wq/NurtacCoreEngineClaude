@@ -12,7 +12,7 @@ VENV = str(ROOT / ".venv/bin/python3")
 # SADECE 3 ENGINE — toplam ~800MB hedef
 ENGINES = [
     ("rolling_window", "rolling_window_engine.py"),
-    ("detector",       "detector_engine.py"),
+    ("detector",       "detector_engine.py --mode live"),
     ("evidence",       "evidence_engine.py"),
 ]
 
