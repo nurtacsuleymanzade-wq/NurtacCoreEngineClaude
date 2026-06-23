@@ -16,6 +16,7 @@ ENGINES = [
     ("historical_baseline", "historical_baseline_engine.py --mode live"),
     ("observer", "observer_engine.py --mode live"),
     ("validator", "validator.py"),
+    ("market_context", "market_context_engine.py"),
     ("detector",       "detector_engine.py --mode live"),
     ("evidence",       "evidence_engine.py"),
 ]
