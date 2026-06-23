@@ -14,6 +14,7 @@ ENGINES = [
     ("rolling_window", "rolling_window_engine.py"),
     ("aligned_candle", "aligned_candle_engine.py"),
     ("historical_baseline", "historical_baseline_engine.py --mode live"),
+    ("observer", "observer_engine.py --mode live"),
     ("detector",       "detector_engine.py --mode live"),
     ("evidence",       "evidence_engine.py"),
 ]
