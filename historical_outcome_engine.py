@@ -28,6 +28,8 @@ import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 
+# DISABLED (OOM risk): from tools.story_context_builder import build_story_context, build_paper_result
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -700,6 +702,9 @@ def _close_observation(state: EngineState, obs: dict, obs_fh,
         "outcomes":     obs["outcomes"],
         "source_event": obs.get("source_event", {}),
         "data_quality": obs.get("data_quality", {}),
+# DISABLED (OOM risk):         "story_context": build_story_context(ewt, obs["event_type"], obs["direction"]),
+# DISABLED (OOM risk):         "paper_result": build_paper_result(obs["event_id"]),
+        "schema_version": "2.0",
         "scores": {
             "confidence":       None,
             "strength_score":   None,
