@@ -60,6 +60,7 @@ WAITING_TIMEOUT_MS    =  60_000   # 1 min
 DEVELOPING_TIMEOUT_MS = 120_000   # 2 min
 VOLUME_BOOST          = 1.3
 ATR_TOUCH_FACTOR      = 0.1       # ATR * 0.1 = touch range for HOLD
+LIVE_CACHE_MAX        = 300
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -117,6 +118,13 @@ def _build_index(records: list[dict]) -> dict[int, dict]:
         if ts is not None:
             idx[int(ts)] = rec
     return idx
+
+def _cache_put(cache: dict[int, dict], ts: int, rec: dict) -> None:
+    cache[ts] = rec
+    overflow = len(cache) - LIVE_CACHE_MAX
+    if overflow > 0:
+        for old_ts in sorted(cache)[:overflow]:
+            cache.pop(old_ts, None)
 
 def _latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
     candidates = [k for k in idx if k <= ts]
@@ -1013,21 +1021,13 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
         await asyncio.sleep(1.0)
 
     with open(path, "r", encoding="utf-8") as f:
-        # Warm-up backlog'u thread pool'da oku — büyük dosyalarda event loop'u
-        # bloke etmesin (tüm diğer engine task'ları o süre boyunca donar).
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
-        for line in backlog:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                ts = rec.get("window_start_ts") or rec.get("ts")
-                if ts is not None:
-                    cache[int(ts)] = rec
-            except Exception:
-                pass
+        backlog = await loop.run_in_executor(None, _read_last_n_jsonl, path, LIVE_CACHE_MAX)
+        for rec in backlog:
+            ts = rec.get("window_start_ts") or rec.get("ts")
+            if ts is not None:
+                _cache_put(cache, int(ts), rec)
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1043,7 +1043,7 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                 rec = json.loads(line)
                 ts = rec.get("window_start_ts") or rec.get("ts")
                 if ts is not None:
-                    cache[int(ts)] = rec
+                    _cache_put(cache, int(ts), rec)
             except Exception:
                 pass
 
@@ -1055,19 +1055,12 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
         await asyncio.sleep(1.0)
 
     with open(BASELINE_FILE, "r", encoding="utf-8") as f:
-        # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
-        for line in backlog:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                if rec.get("timeframe") == "1S":
-                    ctx.baseline_1s = rec
-            except Exception:
-                pass
+        backlog = await loop.run_in_executor(None, _read_last_n_jsonl, BASELINE_FILE, 100)
+        for rec in backlog:
+            if rec.get("timeframe") == "1S":
+                ctx.baseline_1s = rec
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1095,8 +1088,7 @@ async def _tail_setups(ctx: LiveCtx, obs_fh) -> None:
 
     with open(SETUPS_FILE, "r", encoding="utf-8") as f:
         # Read existing setups (already processed before live started — skip)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, f.readlines)  # fast-forward, thread pool'da
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1123,7 +1115,6 @@ async def _primary_task(ctx: LiveCtx) -> None:
             return
         await asyncio.sleep(1.0)
 
-    # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
     loop = asyncio.get_event_loop()
     existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 100)
     print(f"[OBS] Warm-up: {len(existing)} existing primary records", flush=True)
@@ -1216,8 +1207,7 @@ async def run_live() -> None:
         with open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh:
             obs_fh_holder.append(obs_fh)
             with open(SETUPS_FILE, "r", encoding="utf-8") as f:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, f.readlines)  # skip existing, thread pool'da
+                f.seek(0, 2)
                 while True:
                     if HALT_FILE.exists():
                         return
