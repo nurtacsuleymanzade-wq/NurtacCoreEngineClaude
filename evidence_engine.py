@@ -726,15 +726,25 @@ def compute_evidence(
     # ── I. Liquidation magnets and market-depth intelligence ───────────────
     current_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
     liquidation = liquidation or {}
-    nearby_long = liquidation.get("nearby_long_clusters") or []
-    nearby_short = liquidation.get("nearby_short_clusters") or []
+    nearby_long = (
+        liquidation.get("hot_long_clusters")
+        or liquidation.get("nearby_long_clusters")
+        or []
+    )
+    nearby_short = (
+        liquidation.get("hot_short_clusters")
+        or liquidation.get("nearby_short_clusters")
+        or []
+    )
     has_liq_magnet_below = any(
-        _sf(cluster.get("usd_at_risk")) > 30
+        _sf(cluster.get("usd_at_risk")) > 20
+        and cluster.get("intensity_label") in ("HOT", "WARM")
         and _sf(cluster.get("price")) < current_price
         for cluster in nearby_long
     )
     has_liq_magnet_above = any(
-        _sf(cluster.get("usd_at_risk")) > 30
+        _sf(cluster.get("usd_at_risk")) > 20
+        and cluster.get("intensity_label") in ("HOT", "WARM")
         and _sf(cluster.get("price")) > current_price
         for cluster in nearby_short
     )

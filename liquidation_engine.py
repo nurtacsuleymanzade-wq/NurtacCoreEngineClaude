@@ -253,12 +253,37 @@ def calc_liquidation_clusters(
          for price, value in clusters_short.items()),
         key=lambda item: _sf(item.get("usd_at_risk")), reverse=True,
     )[:10]
-    nearby_long = [
+
+    all_clusters = top_long + top_short
+    max_usd = max(
+        (_sf(item.get("usd_at_risk")) for item in all_clusters),
+        default=0.0,
+    )
+    if max_usd > 0:
+        for item in all_clusters:
+            intensity = round(_sf(item.get("usd_at_risk")) / max_usd, 3)
+            item["intensity"] = intensity
+            item["intensity_label"] = (
+                "HOT" if intensity >= 0.7 else
+                "WARM" if intensity >= 0.4 else
+                "COOL"
+            )
+
+    liquidity_threshold = 0.7
+    hot_long = [
         item for item in top_long
+        if _sf(item.get("intensity"), 1.0) >= liquidity_threshold
+    ]
+    hot_short = [
+        item for item in top_short
+        if _sf(item.get("intensity"), 1.0) >= liquidity_threshold
+    ]
+    nearby_long = [
+        item for item in hot_long
         if current_price > 0 and abs(_sf(item.get("price")) - current_price) / current_price < 0.05
     ]
     nearby_short = [
-        item for item in top_short
+        item for item in hot_short
         if current_price > 0 and abs(_sf(item.get("price")) - current_price) / current_price < 0.05
     ]
     nearby = nearby_long + nearby_short
@@ -282,6 +307,10 @@ def calc_liquidation_clusters(
         "nearby_short_clusters": nearby_short,
         "top_long_clusters": top_long,
         "top_short_clusters": top_short,
+        "hot_long_clusters": hot_long,
+        "hot_short_clusters": hot_short,
+        "liquidity_threshold": liquidity_threshold,
+        "max_cluster_usd_m": round(max_usd, 2),
     }
 
 
