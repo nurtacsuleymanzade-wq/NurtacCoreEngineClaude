@@ -38,6 +38,10 @@ files = {
     "volume_profile_1s.jsonl": 500,
     "volume_profile_1m.jsonl": 500,
     "regime_context.jsonl": 5000,
+    "footprint_live.jsonl": 1000,
+    "liquidation_clusters.jsonl": 500,
+    "real_liquidations.jsonl": 5000,
+    "orderbook_walls.jsonl": 1000,
     "footprint_dna_btcusdt.jsonl": 2000,
 }
 
