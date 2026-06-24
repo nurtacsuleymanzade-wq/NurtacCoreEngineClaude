@@ -31,6 +31,7 @@ DATA_DIR  = Path("data")
 HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 FULL_PRINT = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_SLEEP = 0.05
+LIVE_CACHE_MAX = 600
 
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 MEMORY_FILE    = DATA_DIR / "scenario_memory.jsonl"
@@ -126,6 +127,13 @@ def _build_index(records: list[dict]) -> dict[int, dict]:
         if ts is not None:
             idx[int(ts)] = rec
     return idx
+
+
+def _put_live_cache(cache: dict[int, dict], ts: int, rec: dict) -> None:
+    """Keep live timestamp indexes bounded to prevent unbounded RSS growth."""
+    cache[ts] = rec
+    while len(cache) > LIVE_CACHE_MAX:
+        cache.pop(next(iter(cache)))
 
 def _latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
     candidates = [k for k in idx if k <= ts]
@@ -923,7 +931,7 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                 rec = json.loads(line)
                 ts = rec.get("window_start_ts")
                 if ts is not None:
-                    cache[int(ts)] = rec
+                    _put_live_cache(cache, int(ts), rec)
             except Exception:
                 pass
 
@@ -941,7 +949,7 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                 rec = json.loads(line)
                 ts = rec.get("window_start_ts")
                 if ts is not None:
-                    cache[int(ts)] = rec
+                    _put_live_cache(cache, int(ts), rec)
             except Exception:
                 pass
 
