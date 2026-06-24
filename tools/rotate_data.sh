@@ -36,6 +36,8 @@ files = {
     "structure_5m.jsonl": 500,
     "volume_profile_session.jsonl": 500,
     "volume_profile_1s.jsonl": 500,
+    "volume_profile_1m.jsonl": 500,
+    "regime_context.jsonl": 5000,
     "footprint_dna_btcusdt.jsonl": 2000,
 }
 
