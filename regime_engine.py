@@ -157,7 +157,7 @@ def _atr_context() -> tuple[float, str]:
     records = _tail_records(BASELINE_FILE, 50)
     baseline = next(
         (record for record in reversed(records) if record.get("timeframe") == "1S"),
-        {},
+        records[-1] if records else {},
     )
     atr = baseline.get("atr", {}) or {}
     try:
