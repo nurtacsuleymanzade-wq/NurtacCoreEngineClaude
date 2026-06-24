@@ -892,6 +892,7 @@ def compute_evidence(
     comps["max_pain_context"] = {
         "available": bool(max_pain),
         "max_pain_price": max_pain.get("max_pain_price"),
+        "distance_pct": max_pain.get("distance_pct"),
         "bias": mp_bias,
         "expiry_proximity": mp_proximity,
         "options_futures_regime": options_futures.get("regime"),
@@ -1221,6 +1222,18 @@ def try_generate_setup(
                     "liquidation_context", {}).get("nearest_liq_long")),
                 "nearest_liq_short": (ev.get("evidence_components", {}).get(
                     "liquidation_context", {}).get("nearest_liq_short")),
+                "max_pain_price": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("max_pain_price")),
+                "max_pain_bias": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("bias")),
+                "max_pain_distance": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("distance_pct")),
+                "expiry_proximity": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("expiry_proximity")),
+                "options_regime": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("options_futures_regime")),
+                "signal_confidence": (ev.get("evidence_components", {}).get(
+                    "max_pain_context", {}).get("signal_confidence")),
             },
             "status": "open",
         }
