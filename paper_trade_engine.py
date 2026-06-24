@@ -1002,8 +1002,8 @@ def _print_summary(state: TradeState) -> None:
     if n == 0:
         print(f"[PAPER SUMMARY] trades=0 open={len(state.open_trades)}", flush=True)
         return
-    pnls = [_sf(r["results"]["pnl_r"]) for r in t]
-    wins = sum(1 for r in t if r["results"]["outcome"] in ("win","timeout_win"))
+    pnls = [_sf((r.get("results") or r).get("pnl_r")) for r in t]
+    wins = sum(1 for r in t if (r.get("results") or r).get("outcome","") in ("win","timeout_win"))
     wr   = wins / n * 100
     avg  = sum(pnls) / n
     tot  = sum(pnls)
