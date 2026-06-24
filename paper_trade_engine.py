@@ -150,6 +150,43 @@ class TradeState:
         self.max_consec_losses:   int = 0
 
 # ── Open a paper trade ────────────────────────────────────────────────────────
+
+def is_qualified_setup_record(setup: dict) -> bool:
+    """
+    Lifecycle Integrity Guard:
+    Paper trade may open only from qualified setup records.
+
+    Required:
+    - qualified_setup_id OR source_setup_id exists
+    - record came from qualified_setups.jsonl semantics
+    - no terminal observer state
+    """
+    if not isinstance(setup, dict):
+        return False
+
+    qid = setup.get("qualified_setup_id")
+    sid = setup.get("source_setup_id") or setup.get("setup_id")
+
+    if not sid:
+        return False
+
+    # Qualified record must carry qualified id or qualification timestamp.
+    if not qid and setup.get("qualification_ts") is None:
+        return False
+
+    terminal = str(
+        setup.get("observer_state")
+        or setup.get("state")
+        or setup.get("status")
+        or ""
+    ).lower()
+
+    forbidden = {"expired", "invalidated", "waiting_timeout", "timeout", "rejected"}
+    if terminal in forbidden:
+        return False
+
+    return True
+
 def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     # C1: status
     status = setup.get("status", "open")
@@ -165,13 +202,16 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
         return False
 
     # C2: not already processed
-    src_id = setup.get("qualified_setup_id") or setup.get("setup_id", "")
+    src_id = setup.get("qualified_setup_id") or setup.get("source_setup_id") or setup.get("setup_id", "")
     if not src_id or src_id in state.processed_setup_ids:
         return False
 
     # C4: direction valid
     direction = setup.get("direction")
     if direction not in ("long", "short"):
+    if not is_qualified_setup_record(setup):
+        return
+
         return False
 
     # C5: entry price > 0
