@@ -1,0 +1,56 @@
+{
+  "engine": "macro_context_cache",
+  "generated_at": "2026-06-24T00:00:00Z",
+  "current_price": 61838.07,
+  "spot_futures": {
+    "binance_spot_price": 61838.07,
+    "binance_futures_price": 76843.60,
+    "basis_usd": 15005.53,
+    "basis_pct": 24.2685,
+    "basis_signal": "CONTANGO",
+    "move_type": "FUTURES_LED"
+  },
+  "coinbase": {
+    "coinbase_price": 64180.57,
+    "premium_usd": 2342.50,
+    "premium_pct": 3.7877,
+    "premium_signal": "POSITIVE"
+  },
+  "multi_exchange": {
+    "kraken_price": 80692.10,
+    "kraken_delta_pct": 30.4120,
+    "kraken_signal": "WEST_PREMIUM"
+  },
+  "etf": {
+    "etfs": {
+      "IBIT": {
+        "price": 37.00,
+        "change_pct": -2.76,
+        "volume_shares": 6640000,
+        "volume_usd": 245680000.0,
+        "nav_proxy": 11.0497,
+        "premium_discount_pct": 234.9947,
+        "sentiment": "PREMIUM"
+      },
+      "FBTC": {
+        "price": 56.91,
+        "change_pct": -2.65,
+        "volume_shares": 0,
+        "volume_usd": 0.0,
+        "nav_proxy": 5.7058,
+        "premium_discount_pct": 897.4862,
+        "sentiment": "PREMIUM"
+      }
+    },
+    "total_etf_volume_usd": 245680000.0,
+    "etf_sentiment": "OUTFLOW_LIKELY",
+    "etf_signal": "BEARISH"
+  },
+  "netflow_proxy": {
+    "funding_rate": 0.0,
+    "oi_usd_m": null,
+    "oi_change_pct": 0.0,
+    "netflow_proxy": "NEUTRAL",
+    "netflow_signal": "SPOT_DRIVEN"
+  }
+}

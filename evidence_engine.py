@@ -54,6 +54,7 @@ WHALE_SUMMARY_FILE = DATA_DIR / "whale_trade_summary.jsonl"
 ORDERBOOK_STATS_FILE = DATA_DIR / "orderbook_stats.jsonl"
 WHALE_ORDER_FILE = DATA_DIR / "whale_orders.jsonl"
 MAX_PAIN_FILE = DATA_DIR / "max_pain.json"
+MACRO_FILE = DATA_DIR / "macro_context.json"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -899,6 +900,76 @@ def compute_evidence(
         "signal_confidence": signal_confidence,
     }
 
+    # ── H. Macro context (ETF + spot/futures + premium) ─────────────────────────
+    _pre_long, _pre_short = long_score, short_score
+    try:
+        macro = json.loads(MACRO_FILE.read_text(encoding="utf-8")) if MACRO_FILE.exists() else {}
+    except Exception:
+        macro = {}
+
+    signal_reliability = macro.get("signal_reliability", "HIGH")
+    move_type = macro.get("move_type", "MIXED")
+    directional_bias = macro.get("directional_bias", "neutral")
+    etf_signal = macro.get("etf_signal", "NEUTRAL")
+    coinbase_signal = macro.get("coinbase_signal", "NEUTRAL")
+    basis_signal = macro.get("basis_signal", "NEUTRAL")
+    netflow_signal = macro.get("netflow_signal", "NEUTRAL")
+
+    if signal_reliability == "LOW" or move_type == "MIXED":
+        long_score *= 0.6
+        short_score *= 0.6
+        score_breakdown["macro_mixed_penalty"] = -0.4
+    elif signal_reliability == "MEDIUM":
+        long_score *= 0.8
+        short_score *= 0.8
+        score_breakdown["macro_speculative_penalty"] = -0.2
+
+    if move_type == "GENUINE_BULL":
+        long_score += 1.5
+        short_score -= 0.5
+        score_breakdown["macro_genuine_bull"] = 1.5
+        score_breakdown["macro_genuine_bull_counter"] = -0.5
+    elif move_type == "GENUINE_BEAR":
+        short_score += 1.5
+        long_score -= 0.5
+        score_breakdown["macro_genuine_bear"] = 1.5
+        score_breakdown["macro_genuine_bear_counter"] = -0.5
+
+    if etf_signal == "BULLISH":
+        long_score += 1.0
+        short_score -= 0.5
+        score_breakdown["etf_inflow_long"] = 1.0
+        score_breakdown["etf_inflow_counter_short"] = -0.5
+    elif etf_signal == "BEARISH":
+        short_score += 1.0
+        long_score -= 0.5
+        score_breakdown["etf_outflow_short"] = 1.0
+        score_breakdown["etf_outflow_counter_long"] = -0.5
+
+    if coinbase_signal == "POSITIVE":
+        long_score += 0.5
+        short_score -= 0.25
+        score_breakdown["coinbase_premium_long"] = 0.5
+        score_breakdown["coinbase_premium_counter_short"] = -0.25
+    elif coinbase_signal == "NEGATIVE":
+        short_score += 0.5
+        long_score -= 0.25
+        score_breakdown["coinbase_premium_short"] = 0.5
+        score_breakdown["coinbase_premium_counter_long"] = -0.25
+
+    comps["macro_context"] = {
+        "available": bool(macro),
+        "move_type": move_type,
+        "signal_reliability": signal_reliability,
+        "directional_bias": directional_bias,
+        "etf_signal": etf_signal,
+        "coinbase_signal": coinbase_signal,
+        "basis_signal": basis_signal,
+        "netflow_signal": netflow_signal,
+        "long_contribution": round(long_score - _pre_long, 4),
+        "short_contribution": round(short_score - _pre_short, 4),
+    }
+
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
     short_score = max(0.0, short_score)
@@ -1234,6 +1305,22 @@ def try_generate_setup(
                     "max_pain_context", {}).get("options_futures_regime")),
                 "signal_confidence": (ev.get("evidence_components", {}).get(
                     "max_pain_context", {}).get("signal_confidence")),
+            },
+            "macro_context": {
+                "move_type": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("move_type")),
+                "signal_reliability": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("signal_reliability")),
+                "directional_bias": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("directional_bias")),
+                "etf_signal": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("etf_signal")),
+                "coinbase_signal": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("coinbase_signal")),
+                "basis_signal": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("basis_signal")),
+                "netflow_signal": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("netflow_signal")),
             },
             "status": "open",
         }
