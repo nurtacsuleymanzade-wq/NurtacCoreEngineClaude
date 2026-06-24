@@ -954,7 +954,8 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
     with open(BASELINE_FILE, "r", encoding="utf-8") as f:
         # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
+        import subprocess as _sp3
+        backlog = _sp3.getoutput(f"tail -300 {path}").splitlines()
         for line in backlog:
             line = line.strip()
             if not line:
@@ -991,7 +992,8 @@ async def _tail_bias(ctx: LiveCtx) -> None:
 
     with open(BIAS_FILE, "r", encoding="utf-8") as f:
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
+        import subprocess as _sp3
+        backlog = _sp3.getoutput(f"tail -300 {path}").splitlines()
         for line in backlog:
             line = line.strip()
             if line:
