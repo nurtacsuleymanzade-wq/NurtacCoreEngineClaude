@@ -23,6 +23,7 @@ ENGINES = [
     ("validator", "validator.py"),
     ("market_context", "market_context_engine.py"),
     ("detector",       "detector_engine.py --mode live"),
+    ("liquidation",    "liquidation_engine.py --mode live"),
     ("decision_gate",  "decision_gate.py --mode live"),
     ("evidence",       "evidence_engine.py"),
 ]
