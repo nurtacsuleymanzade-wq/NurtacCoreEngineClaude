@@ -58,8 +58,21 @@ DETECTOR_FILES = {
 EDGE_BONUS_STRONG   = 1.0   # added to a detector's score bucket when edge_matrix says "strong"
 EDGE_PENALTY_NEGATIVE = 1.0 # subtracted when edge_matrix says "negative"
 
-MIN_LONG_SCORE_NORMAL = 8.0
+MIN_LONG_SCORE_NORMAL = 4.0   # L1_LOW minimum
 MIN_LONG_SCORE_FLASH  = 12.0
+
+# Kalite tierlari
+TIER_L1_LOW     = 4.0
+TIER_L2_MEDIUM  = 6.0
+TIER_L3_GOOD    = 8.0
+TIER_L4_PREMIUM = 11.0
+
+def _get_tier(score: float) -> str:
+    if score >= TIER_L4_PREMIUM: return "L4_PREMIUM"
+    if score >= TIER_L3_GOOD:    return "L3_GOOD_A+"
+    if score >= TIER_L2_MEDIUM:  return "L2_MEDIUM"
+    if score >= TIER_L1_LOW:     return "L1_LOW"
+    return "BELOW_MIN"
 DOMINANT_GAP_MIN      = 2.0
 ATR_MULTIPLIER_SL     = 1.5
 ATR_MULTIPLIER_TP1    = 1.5
@@ -907,6 +920,7 @@ def try_generate_setup(
             "atr_used": round(atr, 4),
             "trigger_conditions": tc,
             "direction_score": round(ss if direction == "short" else ls, 4),
+            "quality_tier": _get_tier(ss if direction == "short" else ls),
             "scores": {
                 "long_score":  round(ls, 4),
                 "short_score": round(ss, 4),
