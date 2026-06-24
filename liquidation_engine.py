@@ -633,6 +633,7 @@ async def _websocket_loop(
                     except json.JSONDecodeError:
                         continue
                     stream = str(envelope.get("stream", ""))
+                    stream_lower = stream.lower()
                     data = envelope.get("data") or {}
                     state.update({
                         "messages_seen": int(state.get("messages_seen", 0)) + 1,
@@ -640,19 +641,19 @@ async def _websocket_loop(
                     })
                     if int(state.get("messages_seen", 0)) == 1:
                         _write_health(state, "OK")
-                    if stream.endswith("@aggTrade"):
+                    if stream_lower.endswith("@aggtrade"):
                         price = process_agg_trade(data, footprint)
                         process_whale_trade(data, whale_trade_window)
                         if price > 0:
                             state.update({"current_price": price})
-                    elif "@depth20" in stream:
+                    elif "@depth20" in stream_lower:
                         walls.process_depth(data)
                         whale_orders.process_depth_update(
                             walls.bids, walls.asks,
                             _sf(state.get("current_price")),
                             _sf(state.get("current_price")),
                         )
-                    elif stream.endswith("@forceOrder"):
+                    elif stream_lower.endswith("@forceorder"):
                         process_force_order(data)
         except Exception as error:
             state.update({"connected": False})
