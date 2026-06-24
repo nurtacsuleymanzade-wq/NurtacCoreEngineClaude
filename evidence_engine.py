@@ -407,10 +407,10 @@ def compute_evidence(
 
     if d_pos:  long_score  += 1.0
     if d_neg:  short_score += 1.0
-    if d_spos: long_score  += 0.5
-    if d_sneg: short_score += 0.5
-    if d_bid:  long_score  += 0.5
-    if d_ask:  short_score += 0.5
+    if d_spos: long_score  += 1.0
+    if d_sneg: short_score += 1.0
+    if d_bid:  long_score  += 1.0
+    if d_ask:  short_score += 1.0
 
     comps["candle_dna"] = {
         "delta_positive":       d_pos,
@@ -464,14 +464,14 @@ def compute_evidence(
     sm1s["msb_bullish"]       = msb == "bullish"
     sm1s["msb_bearish"]       = msb == "bearish"
 
-    if sm1s["micro_bos_bullish"]: long_score  += 2.0
-    if sm1s["micro_bos_bearish"]: short_score += 2.0
+    if sm1s["micro_bos_bullish"]: long_score  += 1.0
+    if sm1s["micro_bos_bearish"]: short_score += 1.0
     if sm1s["trend_uptrend"]:     long_score  += 1.0
     if sm1s["trend_downtrend"]:   short_score += 1.0
     if sm1s["choch_bullish"]:     long_score  += 2.5
     if sm1s["choch_bearish"]:     short_score += 2.5
-    if sm1s["msb_bullish"]:       long_score  += 1.5
-    if sm1s["msb_bearish"]:       short_score += 1.5
+    if sm1s["msb_bullish"]:       long_score  += 1.0
+    if sm1s["msb_bearish"]:       short_score += 1.0
     comps["smart_money_1s"] = sm1s
 
     # 1M structure
@@ -487,10 +487,10 @@ def compute_evidence(
     sm1m["trend_uptrend_1m"]  = s1m_dir == "uptrend"
     sm1m["trend_downtrend_1m"] = s1m_dir == "downtrend"
 
-    if sm1m["macro_bos_bullish"]: long_score  += 2.0
-    if sm1m["macro_bos_bearish"]: short_score += 2.0
-    if sm1m["trend_uptrend_1m"]:  long_score  += 1.5
-    if sm1m["trend_downtrend_1m"]: short_score += 1.5
+    if sm1m["macro_bos_bullish"]: long_score  += 1.0
+    if sm1m["macro_bos_bearish"]: short_score += 1.0
+    if sm1m["trend_uptrend_1m"]:  long_score  += 1.0
+    if sm1m["trend_downtrend_1m"]: short_score += 1.0
     comps["smart_money_1m"] = sm1m
 
     # 5M structure
@@ -535,10 +535,10 @@ def compute_evidence(
     bl_comp["cvd_falling"]   = bl_cvd  == "falling"
     bl_comp["atr_extreme_high"] = bl_atr_st == "extreme_high"
 
-    if bl_comp["vwap_above"]:  long_score  += 0.5
-    if bl_comp["vwap_below"]:  short_score += 0.5
-    if bl_comp["cvd_rising"]:  long_score  += 0.5
-    if bl_comp["cvd_falling"]: short_score += 0.5
+    if bl_comp["vwap_above"]:  long_score  += 1.0
+    if bl_comp["vwap_below"]:  short_score += 1.0
+    if bl_comp["cvd_rising"]:  long_score  += 1.0
+    if bl_comp["cvd_falling"]: short_score += 1.0
     comps["baseline"] = bl_comp
 
     # ATR extreme_high → scale down both scores
@@ -906,6 +906,7 @@ def try_generate_setup(
             "tp3": {"price": round(tp3, 4), "rr": 3.0},
             "atr_used": round(atr, 4),
             "trigger_conditions": tc,
+            "direction_score": round(ss if direction == "short" else ls, 4),
             "scores": {
                 "long_score":  round(ls, 4),
                 "short_score": round(ss, 4),
