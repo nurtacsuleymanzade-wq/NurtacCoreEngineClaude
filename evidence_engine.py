@@ -1436,6 +1436,28 @@ def try_generate_setup(
         if errs:
             print(f"[EV] SETUP VALIDATION ERROR ts={ts}: {errs}", flush=True)
             return
+        # ── Quality Gate ──────────────────────────────────────────────────────
+        # Detector=0 + Gate=0 olan setup L2+ açamaz.
+        bd  = setup.get("score_breakdown") or {}
+        tier = setup.get("quality_tier", "L1_LOW")
+        DETECTOR_KEYS = ["initiative","absorption","sweep","exhaustion","iceberg","trapped"]
+        GATE_KEYS     = ["gate"]
+        det_sum  = sum(abs(float(v)) for k, v in bd.items()
+                       if any(dk in k for dk in DETECTOR_KEYS)
+                       and isinstance(v, (int, float)))
+        gate_sum = sum(abs(float(v)) for k, v in bd.items()
+                       if any(gk in k for gk in GATE_KEYS)
+                       and isinstance(v, (int, float)))
+        block_reason = None
+        if tier in ("L3_GOOD_A+", "L3_GOOD", "L4_PREMIUM") and det_sum < 1.0:
+            block_reason = f"L3+ requires det>=1.0 got {det_sum:.2f}"
+            setup["quality_tier"] = "L2_MEDIUM"
+        elif tier == "L2_MEDIUM" and det_sum < 0.5 and gate_sum < 0.5:
+            block_reason = f"L2 requires det>=0.5 OR gate>=0.5 got det={det_sum:.2f} gate={gate_sum:.2f}"
+            setup["quality_tier"] = "L1_LOW"
+        if block_reason:
+            setup["score_breakdown"]["quality_block"] = block_reason
+        # ──────────────────────────────────────────────────────────────────────
         _write_jsonl(setups_fh, setup)
         state.emitted_ids.add(setup["setup_id"])
         state.open_setups.append(setup)
