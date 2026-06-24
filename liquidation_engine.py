@@ -26,6 +26,7 @@ CLUSTER_FILE = DATA_DIR / "liquidation_clusters.jsonl"
 REAL_LIQ_FILE = DATA_DIR / "real_liquidations.jsonl"
 WALL_FILE = DATA_DIR / "orderbook_walls.jsonl"
 CALIBRATION_FILE = DATA_DIR / "liquidation_calibration.json"
+HEALTH_FILE = DATA_DIR / "liquidation_health.json"
 MARKET_CONTEXT_FILE = DATA_DIR / "market_context.jsonl"
 
 STREAMS = [
@@ -64,6 +65,21 @@ def _append_jsonl(path: Path, record: dict) -> None:
         output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         output.flush()
         os.fsync(output.fileno())
+
+
+def _write_health(state: dict, status: str, error: str | None = None) -> None:
+    payload = {
+        "engine": "liquidation_engine",
+        "status": status,
+        "connected": bool(state.get("connected", False)),
+        "messages_seen": int(state.get("messages_seen", 0)),
+        "last_message_ts": state.get("last_message_ts"),
+        "last_error": error,
+        "updated_at": int(time.time() * 1000),
+    }
+    temporary = HEALTH_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(HEALTH_FILE)
 
 
 def price_to_bucket(price: float) -> float:
@@ -396,6 +412,8 @@ async def _websocket_loop(
                 WS_URL, ping_interval=20, ping_timeout=10, max_queue=1024,
             ) as websocket:
                 print("[LIQ] Binance combined WebSocket connected", flush=True)
+                state.update({"connected": True})
+                _write_health(state, "OK")
                 backoff = 1
                 async for raw in websocket:
                     if HALT_FILE.exists():
@@ -406,6 +424,12 @@ async def _websocket_loop(
                         continue
                     stream = str(envelope.get("stream", ""))
                     data = envelope.get("data") or {}
+                    state.update({
+                        "messages_seen": int(state.get("messages_seen", 0)) + 1,
+                        "last_message_ts": int(time.time() * 1000),
+                    })
+                    if int(state.get("messages_seen", 0)) == 1:
+                        _write_health(state, "OK")
                     if stream.endswith("@aggTrade"):
                         price = process_agg_trade(data, footprint)
                         if price > 0:
@@ -415,6 +439,8 @@ async def _websocket_loop(
                     elif stream.endswith("@forceOrder"):
                         process_force_order(data)
         except Exception as error:
+            state.update({"connected": False})
+            _write_health(state, "ERROR", str(error))
             print(f"[LIQ] WebSocket error: {error}; retry in {backoff}s", flush=True)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
@@ -424,7 +450,12 @@ async def run_live() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     footprint: dict[float, dict] = {}
     walls = OrderBookWallDetector()
-    state: dict = {"current_price": 0.0}
+    state: dict = {
+        "current_price": 0.0,
+        "connected": False,
+        "messages_seen": 0,
+        "last_message_ts": None,
+    }
     await asyncio.gather(
         _websocket_loop(footprint, walls, state),
         _periodic_outputs(footprint, walls, state),
