@@ -25,6 +25,10 @@ FOOTPRINT_FILE = DATA_DIR / "footprint_live.jsonl"
 CLUSTER_FILE = DATA_DIR / "liquidation_clusters.jsonl"
 REAL_LIQ_FILE = DATA_DIR / "real_liquidations.jsonl"
 WALL_FILE = DATA_DIR / "orderbook_walls.jsonl"
+WHALE_TRADE_FILE = DATA_DIR / "whale_trades.jsonl"
+WHALE_SUMMARY_FILE = DATA_DIR / "whale_trade_summary.jsonl"
+WHALE_ORDER_FILE = DATA_DIR / "whale_orders.jsonl"
+OB_STATS_FILE = DATA_DIR / "orderbook_stats.jsonl"
 CALIBRATION_FILE = DATA_DIR / "liquidation_calibration.json"
 HEALTH_FILE = DATA_DIR / "liquidation_health.json"
 MARKET_CONTEXT_FILE = DATA_DIR / "market_context.jsonl"
@@ -40,6 +44,8 @@ BUCKET_SIZE = 25.0
 FOOTPRINT_INTERVAL_S = 5.0
 WALL_INTERVAL_S = 10.0
 CLUSTER_INTERVAL_S = 30.0
+WHALE_SUMMARY_INTERVAL_S = 30.0
+OB_STATS_INTERVAL_S = 15.0
 CALIBRATION_INTERVAL_S = 7 * 24 * 60 * 60
 
 LEVERAGE_DIST = [
@@ -49,6 +55,10 @@ LEVERAGE_DIST = [
     (50, 0.20),
     (100, 0.10),
 ]
+
+MIN_WHALE_TRADE_USD = 100_000
+MIN_LARGE_TRADE_USD = 500_000
+MIN_MEGA_TRADE_USD = 1_000_000
 
 
 def _sf(value, default: float = 0.0) -> float:
@@ -102,6 +112,68 @@ def process_agg_trade(msg: dict, footprint: dict[float, dict]) -> float:
         entry.update({"buy_vol": _sf(entry.get("buy_vol")) + qty})
     entry.update({"trades": int(entry.get("trades", 0)) + 1})
     return price
+
+
+def process_whale_trade(msg: dict, whale_trade_window: list[dict]) -> dict | None:
+    """Persist qualifying aggregate trades and retain the current summary window."""
+    price = _sf(msg.get("p"), 0.0)
+    qty = _sf(msg.get("q"), 0.0)
+    usd_value = price * qty
+    if price <= 0 or qty <= 0 or usd_value < MIN_WHALE_TRADE_USD:
+        return None
+    side = "sell" if bool(msg.get("m", False)) else "buy"
+    record = {
+        "engine": "liquidation_engine",
+        "type": "whale_trade",
+        "ts": int(msg.get("T", time.time() * 1000) or time.time() * 1000),
+        "side": side,
+        "qty_btc": round(qty, 4),
+        "price": price,
+        "usd_value": round(usd_value, 0),
+        "tier": (
+            "MEGA" if usd_value >= MIN_MEGA_TRADE_USD else
+            "LARGE" if usd_value >= MIN_LARGE_TRADE_USD else "WHALE"
+        ),
+    }
+    _append_jsonl(WHALE_TRADE_FILE, record)
+    whale_trade_window.append(record)
+    print(
+        f"[WHALE TRADE] {side.upper()} ${usd_value / 1000:.0f}K "
+        f"@ {price} [{record.get('tier')}]", flush=True,
+    )
+    return record
+
+
+def flush_whale_trade_summary(
+    whale_trade_window: list[dict], current_price: float,
+) -> dict | None:
+    if not whale_trade_window:
+        return None
+    buy_usd = sum(_sf(item.get("usd_value")) for item in whale_trade_window
+                  if item.get("side") == "buy")
+    sell_usd = sum(_sf(item.get("usd_value")) for item in whale_trade_window
+                   if item.get("side") == "sell")
+    net_flow = buy_usd - sell_usd
+    record = {
+        "engine": "liquidation_engine",
+        "type": "whale_trade_summary",
+        "ts": int(time.time() * 1000),
+        "current_price": current_price,
+        "window_seconds": int(WHALE_SUMMARY_INTERVAL_S),
+        "total_trades": len(whale_trade_window),
+        "buy_usd": round(buy_usd, 0),
+        "sell_usd": round(sell_usd, 0),
+        "net_flow_usd": round(net_flow, 0),
+        "whale_pressure": "buy" if net_flow > 0 else "sell" if net_flow < 0 else "neutral",
+        "pressure_strength": (
+            "STRONG" if abs(net_flow) > 1_000_000 else
+            "MEDIUM" if abs(net_flow) > 300_000 else "WEAK"
+        ),
+        "mega_trades": [item for item in whale_trade_window if item.get("tier") == "MEGA"],
+    }
+    _append_jsonl(WHALE_SUMMARY_FILE, record)
+    whale_trade_window.clear()
+    return record
 
 
 def flush_footprint(footprint: dict[float, dict], current_price: float) -> dict:
@@ -322,6 +394,131 @@ class OrderBookWallDetector:
         return record
 
 
+class WhaleOrderTracker:
+    """Track large top-of-book orders across depth snapshots."""
+
+    WHALE_MULTIPLIER = 15
+
+    def __init__(self) -> None:
+        self.prev_bids: dict[float, float] = {}
+        self.prev_asks: dict[float, float] = {}
+        self.active_whale_orders: dict[str, dict] = {}
+        self.whale_order_threshold = 15.0
+        self.all_sizes: deque[float] = deque(maxlen=500)
+        self.samples_seen = 0
+
+    def update_threshold(self) -> None:
+        if len(self.all_sizes) > 100:
+            average = sum(self.all_sizes) / len(self.all_sizes)
+            self.whale_order_threshold = max(
+                5.0, min(200.0, average * self.WHALE_MULTIPLIER),
+            )
+
+    def _process_side(
+        self, side: str, previous: dict[float, float], current: dict[float, float],
+        last_trade_price: float, ts: int,
+    ) -> None:
+        for price in previous.keys() | current.keys():
+            qty = current.get(price, 0.0)
+            prev_qty = previous.get(price, 0.0)
+            key = f"{side}_{price}"
+            if qty >= self.whale_order_threshold and prev_qty < self.whale_order_threshold:
+                order = {
+                    "side": side,
+                    "price": price,
+                    "qty_btc": qty,
+                    "usd_value": round(qty * price, 0),
+                    "first_seen_ts": ts,
+                    "status": "ACTIVE",
+                }
+                self.active_whale_orders[key] = order
+                _append_jsonl(WHALE_ORDER_FILE, {
+                    **order, "engine": "liquidation_engine", "type": "whale_order",
+                    "ts": ts, "event": "APPEARED",
+                })
+                print(f"[WHALE ORDER] {side.upper()} {qty:.1f} BTC @ {price} APPEARED", flush=True)
+            elif prev_qty >= self.whale_order_threshold and qty < self.whale_order_threshold:
+                order = self.active_whale_orders.pop(key, None)
+                if not order:
+                    continue
+                distance = (
+                    abs(last_trade_price - price) / price * 100
+                    if last_trade_price > 0 and price > 0 else 999.0
+                )
+                event = "FILLED" if distance < 0.05 else "CANCELLED"
+                _append_jsonl(WHALE_ORDER_FILE, {
+                    **order, "engine": "liquidation_engine", "type": "whale_order",
+                    "ts": ts, "event": event,
+                    "duration_seconds": round((ts - int(order.get("first_seen_ts", ts))) / 1000),
+                    "price_distance_pct": round(distance, 4),
+                    "spoofing_suspected": event == "CANCELLED",
+                })
+                if event == "CANCELLED":
+                    print(
+                        f"[SPOOF DETECTED] {side.upper()} {_sf(order.get('qty_btc')):.1f} "
+                        f"BTC @ {price} CANCELLED (price was {last_trade_price})", flush=True,
+                    )
+
+    def process_depth_update(
+        self, new_bids: dict[float, float], new_asks: dict[float, float],
+        current_price: float, last_trade_price: float,
+    ) -> None:
+        del current_price  # reserved for future distance filtering
+        ts = int(time.time() * 1000)
+        sizes = list(new_bids.values()) + list(new_asks.values())
+        self.all_sizes.extend(sizes)
+        self.samples_seen += len(sizes)
+        if self.samples_seen >= 100:
+            self.update_threshold()
+            self.samples_seen %= 100
+        self._process_side("bid", self.prev_bids, new_bids, last_trade_price, ts)
+        self._process_side("ask", self.prev_asks, new_asks, last_trade_price, ts)
+        self.prev_bids = dict(new_bids)
+        self.prev_asks = dict(new_asks)
+
+
+def flush_orderbook_stats(
+    bids: dict[float, float], asks: dict[float, float], current_price: float,
+    whale_threshold: float,
+) -> dict:
+    price_range = current_price * 0.02
+    near_bids = [(price, qty) for price, qty in bids.items()
+                 if abs(price - current_price) <= price_range]
+    near_asks = [(price, qty) for price, qty in asks.items()
+                 if abs(price - current_price) <= price_range]
+    near_bid_vol = sum(qty for _, qty in near_bids)
+    near_ask_vol = sum(qty for _, qty in near_asks)
+    whale_bids = {price: qty for price, qty in bids.items() if qty >= whale_threshold}
+    whale_asks = {price: qty for price, qty in asks.items() if qty >= whale_threshold}
+    wap_bid = (sum(price * qty for price, qty in near_bids) / near_bid_vol
+               if near_bid_vol > 0 else current_price)
+    wap_ask = (sum(price * qty for price, qty in near_asks) / near_ask_vol
+               if near_ask_vol > 0 else current_price)
+    total_volume = near_bid_vol + near_ask_vol
+    bid_pct = near_bid_vol / total_volume * 100 if total_volume > 0 else 50.0
+    top_bids = sorted(bids.items(), key=lambda item: item[1], reverse=True)[:5]
+    top_asks = sorted(asks.items(), key=lambda item: item[1], reverse=True)[:5]
+    record = {
+        "engine": "liquidation_engine", "type": "orderbook_stats",
+        "ts": int(time.time() * 1000), "current_price": current_price,
+        "near_bid_vol_btc": round(near_bid_vol, 2),
+        "near_ask_vol_btc": round(near_ask_vol, 2),
+        "bid_pct": round(bid_pct, 1), "ask_pct": round(100 - bid_pct, 1),
+        "ob_pressure": "bid" if bid_pct > 55 else "ask" if bid_pct < 45 else "neutral",
+        "whale_bid_count": len(whale_bids), "whale_ask_count": len(whale_asks),
+        "whale_bid_total_btc": round(sum(whale_bids.values()), 2),
+        "whale_ask_total_btc": round(sum(whale_asks.values()), 2),
+        "whale_threshold_btc": round(whale_threshold, 2),
+        "wap_bid": round(wap_bid, 2), "wap_ask": round(wap_ask, 2),
+        "bid_ask_spread": round(wap_ask - wap_bid, 2),
+        "top_bid_levels": [{"price": p, "qty": round(q, 2)} for p, q in top_bids],
+        "top_ask_levels": [{"price": p, "qty": round(q, 2)} for p, q in top_asks],
+        "wall_threshold_btc": round(whale_threshold, 2),
+    }
+    _append_jsonl(OB_STATS_FILE, record)
+    return record
+
+
 def _latest_market_context() -> tuple[float, float, float]:
     if not MARKET_CONTEXT_FILE.exists():
         return 0.0, 0.0, 0.0
@@ -372,11 +569,14 @@ def calibrate_leverage_model() -> dict | None:
 
 
 async def _periodic_outputs(
-    footprint: dict[float, dict], walls: OrderBookWallDetector, state: dict,
+    footprint: dict[float, dict], walls: OrderBookWallDetector,
+    whale_orders: WhaleOrderTracker, whale_trade_window: list[dict], state: dict,
 ) -> None:
     next_footprint = time.monotonic() + FOOTPRINT_INTERVAL_S
     next_walls = time.monotonic() + WALL_INTERVAL_S
     next_clusters = time.monotonic() + CLUSTER_INTERVAL_S
+    next_whale_summary = time.monotonic() + WHALE_SUMMARY_INTERVAL_S
+    next_ob_stats = time.monotonic() + OB_STATS_INTERVAL_S
     next_calibration = time.monotonic()
     while not HALT_FILE.exists():
         now = time.monotonic()
@@ -396,6 +596,15 @@ async def _periodic_outputs(
                     calc_liquidation_clusters(cluster_price, oi_usd, funding),
                 )
             next_clusters = now + CLUSTER_INTERVAL_S
+        if now >= next_whale_summary:
+            flush_whale_trade_summary(whale_trade_window, current_price)
+            next_whale_summary = now + WHALE_SUMMARY_INTERVAL_S
+        if now >= next_ob_stats and current_price > 0:
+            flush_orderbook_stats(
+                walls.bids, walls.asks, current_price,
+                whale_orders.whale_order_threshold,
+            )
+            next_ob_stats = now + OB_STATS_INTERVAL_S
         if now >= next_calibration:
             calibrate_leverage_model()
             next_calibration = now + CALIBRATION_INTERVAL_S
@@ -403,7 +612,8 @@ async def _periodic_outputs(
 
 
 async def _websocket_loop(
-    footprint: dict[float, dict], walls: OrderBookWallDetector, state: dict,
+    footprint: dict[float, dict], walls: OrderBookWallDetector,
+    whale_orders: WhaleOrderTracker, whale_trade_window: list[dict], state: dict,
 ) -> None:
     backoff = 1
     while not HALT_FILE.exists():
@@ -432,10 +642,16 @@ async def _websocket_loop(
                         _write_health(state, "OK")
                     if stream.endswith("@aggTrade"):
                         price = process_agg_trade(data, footprint)
+                        process_whale_trade(data, whale_trade_window)
                         if price > 0:
                             state.update({"current_price": price})
                     elif "@depth20" in stream:
                         walls.process_depth(data)
+                        whale_orders.process_depth_update(
+                            walls.bids, walls.asks,
+                            _sf(state.get("current_price")),
+                            _sf(state.get("current_price")),
+                        )
                     elif stream.endswith("@forceOrder"):
                         process_force_order(data)
         except Exception as error:
@@ -450,6 +666,8 @@ async def run_live() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     footprint: dict[float, dict] = {}
     walls = OrderBookWallDetector()
+    whale_orders = WhaleOrderTracker()
+    whale_trade_window: list[dict] = []
     state: dict = {
         "current_price": 0.0,
         "connected": False,
@@ -457,8 +675,10 @@ async def run_live() -> None:
         "last_message_ts": None,
     }
     await asyncio.gather(
-        _websocket_loop(footprint, walls, state),
-        _periodic_outputs(footprint, walls, state),
+        _websocket_loop(footprint, walls, whale_orders, whale_trade_window, state),
+        _periodic_outputs(
+            footprint, walls, whale_orders, whale_trade_window, state,
+        ),
     )
 
 
