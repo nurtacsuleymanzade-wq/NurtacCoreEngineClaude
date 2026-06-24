@@ -727,34 +727,32 @@ def compute_evidence(
     # ── I. Liquidation magnets and market-depth intelligence ───────────────
     current_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
     liquidation = liquidation or {}
-    nearby_long = (
-        liquidation.get("hot_long_clusters")
-        or liquidation.get("nearby_long_clusters")
-        or []
-    )
-    nearby_short = (
-        liquidation.get("hot_short_clusters")
-        or liquidation.get("nearby_short_clusters")
-        or []
-    )
-    has_liq_magnet_below = any(
-        _sf(cluster.get("usd_at_risk")) > 20
+    nearby_long = liquidation.get("nearby_long_clusters") or []
+    nearby_short = liquidation.get("nearby_short_clusters") or []
+    magnet_below = next((
+        cluster for cluster in nearby_long
+        if _sf(cluster.get("usd_at_risk")) > 20
         and cluster.get("intensity_label") in ("HOT", "WARM")
         and _sf(cluster.get("price")) < current_price
-        for cluster in nearby_long
-    )
-    has_liq_magnet_above = any(
-        _sf(cluster.get("usd_at_risk")) > 20
+    ), None)
+    magnet_above = next((
+        cluster for cluster in nearby_short
+        if _sf(cluster.get("usd_at_risk")) > 20
         and cluster.get("intensity_label") in ("HOT", "WARM")
         and _sf(cluster.get("price")) > current_price
-        for cluster in nearby_short
-    )
-    if has_liq_magnet_above:
-        long_score += 1.0
-        score_breakdown["liq_magnet_long"] = 1.0
-    if has_liq_magnet_below:
-        short_score += 1.0
-        score_breakdown["liq_magnet_short"] = 1.0
+    ), None)
+    has_liq_magnet_below = magnet_below is not None
+    has_liq_magnet_above = magnet_above is not None
+    if magnet_above:
+        boost = 1.5 if magnet_above.get("cascade_capable") else 1.0
+        tier = magnet_above.get("leverage_tier", "?")
+        long_score += boost
+        score_breakdown[f"liq_magnet_long_{tier}"] = boost
+    if magnet_below:
+        boost = 1.5 if magnet_below.get("cascade_capable") else 1.0
+        tier = magnet_below.get("leverage_tier", "?")
+        short_score += boost
+        score_breakdown[f"liq_magnet_short_{tier}"] = boost
 
     walls = walls or {}
     nearest_ask = walls.get("nearest_ask_wall") or {}
