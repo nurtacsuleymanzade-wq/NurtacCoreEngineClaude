@@ -76,16 +76,17 @@ def _read_last_n_lines(path, n: int = 200) -> list[dict]:
         return []
     records: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    except OSError:
+        import subprocess as _sp
+        raw = _sp.getoutput(f"tail -{int(n)} {path}")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    except Exception:
         pass
     return records
 

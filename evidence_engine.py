@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -99,50 +100,29 @@ def _read_last_n_lines(path, n: int = 200) -> list[dict]:
         return []
     records: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    except OSError:
+        raw = subprocess.getoutput(f"tail -{int(n)} {path}")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    except Exception:
         pass
     return records
 
 def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
     """Read only last N lines from JSONL file (memory-efficient warm-up)."""
-    if not path.exists():
-        return []
-    records: list[dict] = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            last_records = deque(maxlen=maxlen)
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    last_records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-            records = list(last_records)
-    except OSError:
-        pass
-    return records
+    return _read_last_n_lines(path, maxlen)
 
 def _read_vol_profile_1m() -> dict | None:
     """Read last line of volume_profile_1m.jsonl."""
     if not VOL_PROFILE_1M.exists():
         return None
     try:
-        last_line = ""
-        with open(VOL_PROFILE_1M, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
+        last_line = subprocess.getoutput(f"tail -1 {VOL_PROFILE_1M}").strip()
         if not last_line:
             return None
         return json.loads(last_line)
@@ -154,11 +134,7 @@ def _read_bias_context() -> tuple[str, float]:
     if not BIAS_CTX_FILE.exists():
         return "neutral", 0.0
     try:
-        last_line = ""
-        with open(BIAS_CTX_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
+        last_line = subprocess.getoutput(f"tail -1 {BIAS_CTX_FILE}").strip()
         if not last_line:
             return "neutral", 0.0
         rec = json.loads(last_line)
@@ -175,11 +151,7 @@ def _read_edge_matrix() -> dict:
     if not EDGE_MATRIX_FILE.exists():
         return {}
     try:
-        last_line = ""
-        with open(EDGE_MATRIX_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
+        last_line = subprocess.getoutput(f"tail -1 {EDGE_MATRIX_FILE}").strip()
         if not last_line:
             return {}
         data = json.loads(last_line)
