@@ -209,11 +209,9 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     # C4: direction valid
     direction = setup.get("direction")
     if direction not in ("long", "short"):
+        return False
     if not is_qualified_setup_record(setup):
         return
-
-        return False
-
     # C5: entry price > 0
     entry_obj  = setup.get("entry") or {}
     open_price = _sf(entry_obj.get("recommended_entry"), 0.0)
@@ -594,14 +592,14 @@ def _group_stats(trades: list[dict]) -> dict:
     if not trades:
         return _empty_stats()
 
-    outcomes = [t["results"]["outcome"] for t in trades]
-    pnl_rs   = [_sf(t["results"]["pnl_r"]) for t in trades]
-    durs     = [_sf(t["duration_seconds"]) for t in trades]
+    outcomes = [(t.get("results") or t).get("outcome", "unknown") for t in trades]
+    pnl_rs   = [_sf((t.get("results") or t).get("pnl_r")) for t in trades]
+    durs     = [_sf(t.get("duration_seconds")) for t in trades]
 
     wins      = sum(1 for o in outcomes if o in ("win", "timeout_win"))
     losses    = sum(1 for o in outcomes if o in ("loss", "timeout_loss"))
     bkvns     = sum(1 for o in outcomes if o == "breakeven")
-    timeouts  = sum(1 for o in outcomes if "timeout" in o)
+    timeouts  = sum(1 for o in outcomes if o and "timeout" in o)
     n         = len(trades)
 
     gross_wins   = sum(r for r in pnl_rs if r > 0)
@@ -643,14 +641,14 @@ def _write_summary(state: TradeState) -> None:
     by_cr:  dict[str, int]  = defaultdict(int)
 
     for t in trades:
-        by_dir[t["direction"]].append(t)
-        by_st[t["setup_type"]].append(t)
-        by_tf[t["timeframe_source"]].append(t)
-        sc = (t["context_at_open"] or {}).get("scenario") or "unknown"
+        by_dir[t.get("direction", "unknown")].append(t)
+        by_st[t.get("setup_type", "unknown")].append(t)
+        by_tf[t.get("timeframe_source", "unknown")].append(t)
+        sc = (t.get("context_at_open") or {}).get("scenario") or "unknown"
         by_sc[sc].append(t)
-        gg = (t["context_at_open"] or {}).get("gate_grade") or "unknown"
+        gg = (t.get("context_at_open") or {}).get("gate_grade") or "unknown"
         by_gg[gg].append(t)
-        cr = t["results"]["outcome"]
+        cr = (t.get("results") or t).get("outcome", "unknown")
         by_cr[cr] += 1
 
     out = {
