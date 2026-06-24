@@ -35,6 +35,7 @@ MARKET_CONTEXT_FILE = DATA_DIR / "market_context.jsonl"
 
 STREAMS = [
     "btcusdt@aggTrade",
+    "btcusdt@trade",
     "btcusdt@depth20@100ms",
     "btcusdt@forceOrder",
 ]
@@ -671,7 +672,9 @@ async def _websocket_loop(
                     })
                     if int(state.get("messages_seen", 0)) == 1:
                         _write_health(state, "OK")
-                    if event_type == "aggtrade" or stream_lower.endswith("@aggtrade"):
+                    if event_type in ("aggtrade", "trade") or stream_lower.endswith(
+                        ("@aggtrade", "@trade")
+                    ):
                         price = process_agg_trade(data, footprint)
                         process_whale_trade(data, whale_trade_window)
                         if price > 0:
