@@ -29,6 +29,7 @@ WHALE_TRADE_FILE = DATA_DIR / "whale_trades.jsonl"
 WHALE_SUMMARY_FILE = DATA_DIR / "whale_trade_summary.jsonl"
 WHALE_ORDER_FILE = DATA_DIR / "whale_orders.jsonl"
 OB_STATS_FILE = DATA_DIR / "orderbook_stats.jsonl"
+LIQ_SETUPS_FILE = DATA_DIR / "liquidation_setups.jsonl"
 CALIBRATION_FILE = DATA_DIR / "liquidation_calibration.json"
 HEALTH_FILE = DATA_DIR / "liquidation_health.json"
 MARKET_CONTEXT_FILE = DATA_DIR / "market_context.jsonl"
@@ -48,6 +49,9 @@ CLUSTER_INTERVAL_S = 30.0
 WHALE_SUMMARY_INTERVAL_S = 30.0
 OB_STATS_INTERVAL_S = 15.0
 CALIBRATION_INTERVAL_S = 7 * 24 * 60 * 60
+CLUSTER_APPROACH_PCT = 0.003
+CASCADE_WINDOW_MS = 60_000
+CASCADE_MIN_USD = 500_000
 
 LEVERAGE_DIST = [
     (5, 0.15),
@@ -616,6 +620,219 @@ def _latest_market_context() -> tuple[float, float, float]:
     return price, oi_btc * price, funding
 
 
+def _get_atr() -> float:
+    raw = subprocess.getoutput(
+        "tail -20 data/historical_baseline_dna.jsonl 2>/dev/null",
+    )
+    for line in reversed(raw.splitlines()):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("timeframe") != "1S":
+            continue
+        atr_value = record.get("atr_1s", 0)
+        if not atr_value:
+            atr_field = record.get("atr", 0)
+            atr_value = atr_field.get("atr", 0) if isinstance(atr_field, dict) else atr_field
+        atr = _sf(atr_value, 0.0)
+        if atr > 0:
+            return atr
+    return 0.0
+
+
+def _make_liq_setup(
+    ts: int, current_price: float, atr: float, direction: str,
+    setup_type: str, score: float, sl_multiplier: float,
+    liq_context: dict, trigger_conditions: dict,
+) -> dict:
+    sign = 1.0 if direction == "long" else -1.0
+    return {
+        "engine": "liquidation_engine",
+        "setup_id": f"{ts}_{direction}_{setup_type}",
+        "symbol": "BTCUSDT",
+        "setup_type": setup_type,
+        "direction": direction,
+        "window_start_ts": ts,
+        "window_end_ts": ts + 1000,
+        "entry": {
+            "price": round(current_price, 2),
+            "triggered_at_ts": ts,
+            "timeframe_context": "LIQ",
+        },
+        "sl": {
+            "price": round(current_price - sign * atr * sl_multiplier, 2),
+            "atr_multiplier": sl_multiplier,
+        },
+        "tp1": {"price": round(current_price + sign * atr, 2), "rr": 1.0},
+        "tp2": {"price": round(current_price + sign * atr * 2, 2), "rr": 2.0},
+        "tp3": {"price": round(current_price + sign * atr * 3, 2), "rr": 3.0},
+        "atr_used": round(atr, 4),
+        "trigger_conditions": trigger_conditions,
+        "scores": {
+            "long_score": score if direction == "long" else 0.0,
+            "short_score": score if direction == "short" else 0.0,
+            "score_gap": score,
+        },
+        "direction_score": score,
+        "quality_tier": "L2_MEDIUM" if score >= 5.0 else "L1_LOW",
+        "pattern_key": setup_type,
+        "calibration": {
+            "observed_wr": None,
+            "score_boost": 0.0,
+            "tier_downgraded": False,
+        },
+        "regime_context": {
+            "trend_regime": None,
+            "volatility_class": None,
+            "session": None,
+            "trade_allowed": True,
+            "compatible_setups": [],
+        },
+        "entry_timing": "mid",
+        "score_breakdown": {setup_type: score},
+        "market_depth": {},
+        "liq_context": liq_context,
+        "context": {
+            "gate_grade": None,
+            "micro_bos": None,
+            "macro_bos": None,
+            "trend_1s": "unknown",
+            "trend_1m": "unknown",
+            "trend_5m": "unknown",
+            "choch_confirmed": None,
+            "msb": None,
+            "active_ob_count": 1 if setup_type == "liq_anticipation" else 0,
+            "active_fvg_count": 0,
+        },
+        "status": "open",
+    }
+
+
+def _check_liq_setups(
+    current_price: float, liq_clusters: dict, liq_setup_state: dict, atr: float,
+) -> None:
+    if current_price <= 0 or atr <= 0:
+        return
+    ts = int(time.time() * 1000)
+    triggered = liq_setup_state.setdefault("last_triggered_clusters", set())
+    emitted = liq_setup_state.setdefault("emitted_ids", set())
+    previous_price = _sf(liq_setup_state.get("prev_price"), current_price)
+
+    hot_clusters = (
+        (liq_clusters.get("hot_long_clusters") or [])
+        + (liq_clusters.get("hot_short_clusters") or [])
+    )
+    for cluster in hot_clusters:
+        cluster_price = _sf(cluster.get("price"), 0.0)
+        cluster_side = cluster.get("side")
+        if cluster_price <= 0 or cluster_side not in ("long", "short"):
+            continue
+        cluster_id = f"{cluster_side}_{cluster_price}"
+        distance_pct = abs(current_price - cluster_price) / current_price
+        if cluster_id in triggered:
+            if distance_pct > 0.01:
+                triggered.discard(cluster_id)
+            continue
+        if distance_pct > CLUSTER_APPROACH_PCT:
+            continue
+
+        moving_toward = (
+            cluster_side == "long"
+            and current_price > cluster_price
+            and current_price < previous_price
+        ) or (
+            cluster_side == "short"
+            and current_price < cluster_price
+            and current_price > previous_price
+        )
+        if not moving_toward:
+            continue
+
+        direction = "short" if cluster_side == "long" else "long"
+        setup = _make_liq_setup(
+            ts, current_price, atr, direction, "liq_anticipation", 4.0, 1.0,
+            {
+                "trigger": "CLUSTER_APPROACH",
+                "cluster_price": cluster_price,
+                "cluster_side": cluster_side,
+                "cluster_usd_m": _sf(cluster.get("usd_at_risk")),
+                "cluster_intensity": _sf(cluster.get("intensity")),
+                "cluster_tier": cluster.get("leverage_tier"),
+                "cascade_capable": bool(cluster.get("cascade_capable")),
+                "distance_pct": round(distance_pct * 100, 3),
+            },
+            {
+                "S1_dominant_side": True, "S2_min_score": True,
+                "S3_gate_grade": False, "S4_1s_trend": True,
+                "S5_bos_or_1m_trend": False, "S6_ob_or_fvg": True,
+                "S7_not_counter_trend": True,
+            },
+        )
+        setup_id = setup.get("setup_id")
+        if setup_id in emitted:
+            continue
+        _append_jsonl(LIQ_SETUPS_FILE, setup)
+        triggered.add(cluster_id)
+        emitted.add(setup_id)
+        print(
+            f"[LIQ SETUP] CLUSTER_APPROACH -> {direction.upper()} "
+            f"@ {current_price} | cluster={cluster_price} "
+            f"({cluster.get('leverage_tier')}, intensity={cluster.get('intensity')})",
+            flush=True,
+        )
+
+    liq_setup_state["prev_price"] = current_price
+    cutoff = ts - CASCADE_WINDOW_MS
+    recent_liqs = [
+        record for record in liq_setup_state.get("recent_liqs", [])
+        if int(record.get("ts", 0) or 0) >= cutoff
+    ]
+    liq_setup_state["recent_liqs"] = recent_liqs
+    totals = {
+        "long": sum(
+            _sf(record.get("usd_value")) for record in recent_liqs
+            if record.get("liq_type") == "long_liquidated"
+        ),
+        "short": sum(
+            _sf(record.get("usd_value")) for record in recent_liqs
+            if record.get("liq_type") == "short_liquidated"
+        ),
+    }
+    for liq_side, reversal_dir in (("long", "long"), ("short", "short")):
+        liq_usd = totals.get(liq_side, 0.0)
+        if liq_usd < CASCADE_MIN_USD:
+            continue
+        cascade_id = f"{ts // 30000 * 30000}_{reversal_dir}_cascade"
+        if cascade_id in emitted:
+            continue
+        setup = _make_liq_setup(
+            ts, current_price, atr, reversal_dir,
+            "liq_cascade_reversal", 5.0, 1.5,
+            {
+                "trigger": "CASCADE_REVERSAL",
+                "liq_side": liq_side,
+                "liq_usd": round(liq_usd, 0),
+                "liq_usd_m": round(liq_usd / 1e6, 2),
+                "window_ms": CASCADE_WINDOW_MS,
+            },
+            {
+                "S1_dominant_side": True, "S2_min_score": True,
+                "S3_gate_grade": False, "S4_1s_trend": True,
+                "S5_bos_or_1m_trend": False, "S6_ob_or_fvg": False,
+                "S7_not_counter_trend": True,
+            },
+        )
+        emitted.add(cascade_id)
+        emitted.add(setup.get("setup_id"))
+        _append_jsonl(LIQ_SETUPS_FILE, setup)
+        print(
+            f"[LIQ SETUP] CASCADE_REVERSAL -> {reversal_dir.upper()} "
+            f"@ {current_price} | {liq_side} liq ${liq_usd / 1000:.0f}K",
+            flush=True,
+        )
+
+
 def calibrate_leverage_model() -> dict | None:
     if not REAL_LIQ_FILE.exists():
         return None
@@ -674,10 +891,12 @@ async def _periodic_outputs(
             context_price, oi_usd, funding = _latest_market_context()
             cluster_price = current_price or context_price
             if cluster_price > 0 and oi_usd > 0:
-                _append_jsonl(
-                    CLUSTER_FILE,
-                    calc_liquidation_clusters(cluster_price, oi_usd, funding),
+                clusters = calc_liquidation_clusters(
+                    cluster_price, oi_usd, funding,
                 )
+                state["liq_clusters"] = clusters
+                _append_jsonl(CLUSTER_FILE, clusters)
+            state["atr"] = _get_atr() or _sf(state.get("atr"), 50.0)
             next_clusters = now + CLUSTER_INTERVAL_S
         if now >= next_whale_summary:
             flush_whale_trade_summary(whale_trade_window, current_price)
@@ -697,6 +916,7 @@ async def _periodic_outputs(
 async def _websocket_loop(
     footprint: dict[float, dict], walls: OrderBookWallDetector,
     whale_orders: WhaleOrderTracker, whale_trade_window: list[dict], state: dict,
+    liq_setup_state: dict,
 ) -> None:
     backoff = 1
     while not HALT_FILE.exists():
@@ -732,6 +952,12 @@ async def _websocket_loop(
                         process_whale_trade(data, whale_trade_window)
                         if price > 0:
                             state.update({"current_price": price})
+                            clusters = state.get("liq_clusters") or {}
+                            atr = _sf(state.get("atr"), 0.0)
+                            if clusters and atr > 0:
+                                _check_liq_setups(
+                                    price, clusters, liq_setup_state, atr,
+                                )
                     elif event_type == "depthupdate" or "@depth20" in stream_lower:
                         walls.process_depth(data)
                         if _sf(state.get("current_price")) <= 0 and walls.bids and walls.asks:
@@ -744,7 +970,9 @@ async def _websocket_loop(
                             _sf(state.get("current_price")),
                         )
                     elif event_type == "forceorder" or stream_lower.endswith("@forceorder"):
-                        process_force_order(data)
+                        record = process_force_order(data)
+                        if record:
+                            liq_setup_state.setdefault("recent_liqs", []).append(record)
         except Exception as error:
             state.update({"connected": False})
             _write_health(state, "ERROR", str(error))
@@ -759,14 +987,24 @@ async def run_live() -> None:
     walls = OrderBookWallDetector()
     whale_orders = WhaleOrderTracker()
     whale_trade_window: list[dict] = []
+    liq_setup_state: dict = {
+        "last_triggered_clusters": set(),
+        "recent_liqs": [],
+        "emitted_ids": set(),
+    }
     state: dict = {
         "current_price": 0.0,
         "connected": False,
         "messages_seen": 0,
         "last_message_ts": None,
+        "atr": 50.0,
+        "liq_clusters": {},
     }
     await asyncio.gather(
-        _websocket_loop(footprint, walls, whale_orders, whale_trade_window, state),
+        _websocket_loop(
+            footprint, walls, whale_orders, whale_trade_window, state,
+            liq_setup_state,
+        ),
         _periodic_outputs(
             footprint, walls, whale_orders, whale_trade_window, state,
         ),
