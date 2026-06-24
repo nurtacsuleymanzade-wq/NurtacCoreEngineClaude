@@ -50,6 +50,9 @@ BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
 REGIME_FILE    = DATA_DIR / "regime_context.jsonl"
 LIQ_CLUSTER_FILE = DATA_DIR / "liquidation_clusters.jsonl"
 ORDERBOOK_WALL_FILE = DATA_DIR / "orderbook_walls.jsonl"
+WHALE_SUMMARY_FILE = DATA_DIR / "whale_trade_summary.jsonl"
+ORDERBOOK_STATS_FILE = DATA_DIR / "orderbook_stats.jsonl"
+WHALE_ORDER_FILE = DATA_DIR / "whale_orders.jsonl"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -119,6 +122,15 @@ def _read_last_n_lines(path, n: int = 200) -> list[dict]:
 def _read_last_n_jsonl(path: Path, maxlen: int) -> list[dict]:
     """Read only last N lines from JSONL file (memory-efficient warm-up)."""
     return _read_last_n_lines(path, maxlen)
+
+
+def _count_recent_spoof_cancellations(records, ts: int) -> int:
+    cutoff = ts - 300_000
+    return sum(
+        1 for record in records
+        if record.get("event") == "CANCELLED"
+        and cutoff <= int(record.get("ts", 0) or 0) <= ts
+    )
 
 def _read_vol_profile_1m() -> dict | None:
     """Read last line of volume_profile_1m.jsonl."""
@@ -418,6 +430,9 @@ def compute_evidence(
     baseline: dict | None,
     liquidation: dict | None = None,
     walls: dict | None = None,
+    whale_summary: dict | None = None,
+    orderbook_stats: dict | None = None,
+    spoofing_cancel_count: int = 0,
 ) -> dict:
     """Compute long_score and short_score for one 1S bar."""
     long_score  = 0.0
@@ -708,7 +723,7 @@ def compute_evidence(
     score_breakdown["scenario_long"]  = round(long_score  - _pre_long,  4)
     score_breakdown["scenario_short"] = round(short_score - _pre_short, 4)
 
-    # ── I. Liquidation magnets and blocking order-book walls ────────────────
+    # ── I. Liquidation magnets and market-depth intelligence ───────────────
     current_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
     liquidation = liquidation or {}
     nearby_long = liquidation.get("nearby_long_clusters") or []
@@ -743,12 +758,39 @@ def compute_evidence(
         and _sf(nearest_bid.get("distance_pct"), 999.0) < 0.5
         and _sf(nearest_bid.get("qty_btc")) > 20
     )
-    if wall_blocking_long:
-        long_score -= 0.5
-        score_breakdown["wall_blocking_long"] = -0.5
-    if wall_blocking_short:
-        short_score -= 0.5
-        score_breakdown["wall_blocking_short"] = -0.5
+    walls_reliable = spoofing_cancel_count < 3
+    if wall_blocking_long and walls_reliable:
+        long_score -= 1.0
+        score_breakdown["wall_blocking_long"] = -1.0
+    if wall_blocking_short and walls_reliable:
+        short_score -= 1.0
+        score_breakdown["wall_blocking_short"] = -1.0
+
+    whale_summary = whale_summary or {}
+    whale_pressure = whale_summary.get("whale_pressure")
+    whale_strength = whale_summary.get("pressure_strength")
+    whale_boost = 1.0 if whale_strength == "STRONG" else 0.5
+    if whale_pressure == "buy":
+        long_score += whale_boost
+        score_breakdown["whale_pressure_long"] = whale_boost
+        if whale_strength == "STRONG":
+            short_score -= 1.0
+            score_breakdown["whale_counter_short"] = -1.0
+    elif whale_pressure == "sell":
+        short_score += whale_boost
+        score_breakdown["whale_pressure_short"] = whale_boost
+        if whale_strength == "STRONG":
+            long_score -= 1.0
+            score_breakdown["whale_counter_long"] = -1.0
+
+    orderbook_stats = orderbook_stats or {}
+    bid_pct = _sf(orderbook_stats.get("bid_pct"), 50.0)
+    if bid_pct >= 65:
+        long_score += 1.0
+        score_breakdown["ob_imbalance_long"] = 1.0
+    elif bid_pct <= 35:
+        short_score += 1.0
+        score_breakdown["ob_imbalance_short"] = 1.0
     comps["liquidation_context"] = {
         "available": bool(liquidation),
         "cascade_risk": liquidation.get("cascade_risk"),
@@ -757,6 +799,14 @@ def compute_evidence(
         "walls_available": bool(walls),
         "wall_blocking_long": wall_blocking_long,
         "wall_blocking_short": wall_blocking_short,
+        "walls_reliable": walls_reliable,
+        "spoofing_cancel_count_5m": spoofing_cancel_count,
+        "whale_pressure": whale_pressure,
+        "whale_pressure_strength": whale_strength,
+        "ob_pressure": orderbook_stats.get("ob_pressure"),
+        "bid_pct": bid_pct,
+        "nearest_liq_long": nearby_long[0].get("price") if nearby_long else None,
+        "nearest_liq_short": nearby_short[0].get("price") if nearby_short else None,
     }
 
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
@@ -795,6 +845,8 @@ def compute_evidence(
             "baseline":    baseline is not None,
             "liquidation_clusters": bool(liquidation),
             "orderbook_walls": bool(walls),
+            "whale_trade_summary": bool(whale_summary),
+            "orderbook_stats": bool(orderbook_stats),
         },
     }
 
@@ -1066,6 +1118,20 @@ def try_generate_setup(
                 "active_ob_count": active_ob_n,
                 "active_fvg_count": active_fvg_n,
             },
+            "market_depth": {
+                "whale_pressure": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("whale_pressure")),
+                "ob_imbalance": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("ob_pressure")),
+                "cascade_risk": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("cascade_risk")),
+                "bid_pct": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("bid_pct")),
+                "nearest_liq_long": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("nearest_liq_long")),
+                "nearest_liq_short": (ev.get("evidence_components", {}).get(
+                    "liquidation_context", {}).get("nearest_liq_short")),
+            },
             "status": "open",
         }
 
@@ -1201,6 +1267,9 @@ def run_batch() -> None:
     }
     liq_idx = _build_exact_index(_read_last_n_lines(LIQ_CLUSTER_FILE, 200))
     wall_idx = _build_exact_index(_read_last_n_lines(ORDERBOOK_WALL_FILE, 200))
+    whale_summary_idx = _build_exact_index(_read_last_n_lines(WHALE_SUMMARY_FILE, 100))
+    orderbook_stats_idx = _build_exact_index(_read_last_n_lines(ORDERBOOK_STATS_FILE, 100))
+    whale_order_records = _read_last_n_lines(WHALE_ORDER_FILE, 2000)
 
     # Baseline: latest record per timeframe
     baseline_1m: dict | None = None
@@ -1237,10 +1306,16 @@ def run_batch() -> None:
             regime  = _get_latest_at_or_before(regime_idx, ts)
             liquidation = _get_latest_at_or_before(liq_idx, ts)
             walls = _get_latest_at_or_before(wall_idx, ts)
+            whale_summary = _get_latest_at_or_before(whale_summary_idx, ts)
+            orderbook_stats = _get_latest_at_or_before(orderbook_stats_idx, ts)
+            spoofing_cancel_count = _count_recent_spoof_cancellations(
+                whale_order_records, ts,
+            )
 
             ev = compute_evidence(
                 raw, gate, s1s, s1m, s5m, det_rec, baseline_1m,
-                liquidation, walls,
+                liquidation, walls, whale_summary, orderbook_stats,
+                spoofing_cancel_count,
             )
 
             errs = _validate_evidence(ev)
@@ -1270,6 +1345,9 @@ class LiveCtx:
         self.regime: dict[int, dict] = {}
         self.liquidation: dict[int, dict] = {}
         self.walls: dict[int, dict] = {}
+        self.whale_summary: dict[int, dict] = {}
+        self.orderbook_stats: dict[int, dict] = {}
+        self.whale_orders: dict[int, dict] = {}
         self.baseline_1m: dict | None = None
         self.setup_state = SetupState()
 
@@ -1434,10 +1512,16 @@ async def _primary_task(ctx: LiveCtx) -> None:
             regime  = _get_latest_at_or_before(ctx.regime, ts)
             liquidation = _get_latest_at_or_before(ctx.liquidation, ts)
             walls = _get_latest_at_or_before(ctx.walls, ts)
+            whale_summary = _get_latest_at_or_before(ctx.whale_summary, ts)
+            orderbook_stats = _get_latest_at_or_before(ctx.orderbook_stats, ts)
+            spoofing_cancel_count = _count_recent_spoof_cancellations(
+                ctx.whale_orders.values(), ts,
+            )
 
             ev = compute_evidence(
                 raw, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m,
-                liquidation, walls,
+                liquidation, walls, whale_summary, orderbook_stats,
+                spoofing_cancel_count,
             )
 
             errs = _validate_evidence(ev)
@@ -1464,6 +1548,9 @@ async def run_live() -> None:
         asyncio.create_task(_tail_secondary_file(REGIME_FILE, ctx.regime, "regime"), name="ev-regime"),
         asyncio.create_task(_tail_secondary_file(LIQ_CLUSTER_FILE, ctx.liquidation, "liquidation"), name="ev-liquidation"),
         asyncio.create_task(_tail_secondary_file(ORDERBOOK_WALL_FILE, ctx.walls, "walls"), name="ev-walls"),
+        asyncio.create_task(_tail_secondary_file(WHALE_SUMMARY_FILE, ctx.whale_summary, "whale-summary"), name="ev-whale-summary"),
+        asyncio.create_task(_tail_secondary_file(ORDERBOOK_STATS_FILE, ctx.orderbook_stats, "orderbook-stats"), name="ev-orderbook-stats"),
+        asyncio.create_task(_tail_secondary_file(WHALE_ORDER_FILE, ctx.whale_orders, "whale-orders"), name="ev-whale-orders"),
         asyncio.create_task(_tail_secondary_file(BASELINE_FILE,  {},      "bl",
                                                  ctx=ctx, is_baseline=True),       name="ev-bl"),
     ]
