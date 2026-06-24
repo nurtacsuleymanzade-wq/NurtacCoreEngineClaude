@@ -914,6 +914,15 @@ def compute_evidence(
     coinbase_signal = macro.get("coinbase_signal", "NEUTRAL")
     basis_signal = macro.get("basis_signal", "NEUTRAL")
     netflow_signal = macro.get("netflow_signal", "NEUTRAL")
+    smart_bias = macro.get("smart_money_bias", "neutral")
+    smart_conviction = macro.get("smart_money_conviction", "HIGH")
+    divergence_signal = macro.get("divergence_signal", "NEUTRAL")
+    price_oi_regime = macro.get("price_oi_regime", "NEUTRAL")
+    ls_trend_data = macro.get("ls_trend") or {}
+    if isinstance(ls_trend_data, dict):
+        ls_trend_value = ls_trend_data.get("ls_trend", "STABLE")
+    else:
+        ls_trend_value = ls_trend_data or macro.get("ls_trend_signal", "STABLE")
 
     if signal_reliability == "LOW" or move_type == "MIXED":
         long_score *= 0.6
@@ -957,6 +966,38 @@ def compute_evidence(
         score_breakdown["coinbase_premium_short"] = 0.5
         score_breakdown["coinbase_premium_counter_long"] = -0.25
 
+    smart_boost = 1.5 if smart_conviction == "HIGH" else 0.7
+    if smart_bias == "bullish":
+        long_score += smart_boost
+        short_score -= 1.0
+        score_breakdown["smart_money_divergence_long"] = smart_boost
+        score_breakdown["smart_money_counter_short"] = -1.0
+    elif smart_bias == "bearish":
+        short_score += smart_boost
+        long_score -= 1.0
+        score_breakdown["smart_money_divergence_short"] = smart_boost
+        score_breakdown["smart_money_counter_long"] = -1.0
+
+    if price_oi_regime == "STRONG_LONG_MOMENTUM":
+        long_score += 1.0
+        score_breakdown["oi_momentum_long"] = 1.0
+    elif price_oi_regime == "STRONG_SHORT_MOMENTUM":
+        short_score += 1.0
+        score_breakdown["oi_momentum_short"] = 1.0
+    elif price_oi_regime == "SHORT_COVERING":
+        long_score -= 0.5
+        score_breakdown["oi_weak_move_long"] = -0.5
+    elif price_oi_regime == "LONG_UNWINDING":
+        short_score -= 0.5
+        score_breakdown["oi_weak_move_short"] = -0.5
+
+    if ls_trend_value == "LONGS_INCREASING":
+        short_score += 0.5
+        score_breakdown["retail_trap_short"] = 0.5
+    elif ls_trend_value == "SHORTS_INCREASING":
+        long_score += 0.5
+        score_breakdown["retail_trap_long"] = 0.5
+
     comps["macro_context"] = {
         "available": bool(macro),
         "move_type": move_type,
@@ -966,6 +1007,11 @@ def compute_evidence(
         "coinbase_signal": coinbase_signal,
         "basis_signal": basis_signal,
         "netflow_signal": netflow_signal,
+        "smart_money_bias": smart_bias,
+        "smart_money_conviction": smart_conviction,
+        "divergence_signal": divergence_signal,
+        "price_oi_regime": price_oi_regime,
+        "ls_trend": ls_trend_value,
         "long_contribution": round(long_score - _pre_long, 4),
         "short_contribution": round(short_score - _pre_short, 4),
     }
@@ -1321,6 +1367,16 @@ def try_generate_setup(
                     "macro_context", {}).get("basis_signal")),
                 "netflow_signal": (ev.get("evidence_components", {}).get(
                     "macro_context", {}).get("netflow_signal")),
+                "smart_money_bias": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("smart_money_bias")),
+                "smart_money_conviction": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("smart_money_conviction")),
+                "divergence_signal": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("divergence_signal")),
+                "price_oi_regime": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("price_oi_regime")),
+                "ls_trend": (ev.get("evidence_components", {}).get(
+                    "macro_context", {}).get("ls_trend")),
             },
             "status": "open",
         }

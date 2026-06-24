@@ -298,6 +298,170 @@ def fetch_spot_netflow_proxy() -> dict:
     return {"funding_rate": round(funding, 8), "oi_usd_m": round(oi_usd / 1e6, 1) if oi_usd > 0 else None, "oi_change_pct": round(oi_change_pct, 4), "netflow_proxy": "NEUTRAL", "netflow_signal": "SPOT_DRIVEN"}
 
 
+def fetch_top_trader_divergence() -> dict:
+    """Compare Binance top-trader positioning with the global account ratio."""
+    base = "https://fapi.binance.com/futures/data"
+    top_accounts_r = _fetch_json(
+        f"{base}/topLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1"
+    )
+    top_positions_r = _fetch_json(
+        f"{base}/topLongShortPositionRatio?symbol=BTCUSDT&period=5m&limit=1"
+    )
+    global_r = _fetch_json(
+        f"{base}/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1"
+    )
+
+    top_accounts = (
+        top_accounts_r[0]
+        if isinstance(top_accounts_r, list) and top_accounts_r
+        else top_accounts_r if isinstance(top_accounts_r, dict) else {}
+    )
+    top_positions = (
+        top_positions_r[0]
+        if isinstance(top_positions_r, list) and top_positions_r
+        else top_positions_r if isinstance(top_positions_r, dict) else {}
+    )
+    global_ratio_data = (
+        global_r[0]
+        if isinstance(global_r, list) and global_r
+        else global_r if isinstance(global_r, dict) else {}
+    )
+    if not top_accounts and not global_ratio_data:
+        return {}
+
+    def _account_ratio(payload: dict) -> tuple[float, float, float]:
+        try:
+            long_pct = float(payload.get("longAccount", 0) or 0)
+            short_pct = float(payload.get("shortAccount", 0) or 0)
+            ratio = long_pct / short_pct if short_pct > 0 else 1.0
+            return long_pct, short_pct, ratio
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0, 0.0, 1.0
+
+    top_acc_l, top_acc_s, top_acc_ratio = _account_ratio(top_accounts)
+    top_pos_l, _, top_pos_ratio = _account_ratio(top_positions)
+    global_l, global_s, global_ratio = _account_ratio(global_ratio_data)
+    divergence = round(top_acc_ratio - global_ratio, 4)
+
+    if divergence > 0.4:
+        divergence_signal = "TOP_TRADER_LONG_RETAIL_SHORT"
+        smart_money_bias = "bullish"
+    elif divergence < -0.4:
+        divergence_signal = "TOP_TRADER_SHORT_RETAIL_LONG"
+        smart_money_bias = "bearish"
+    else:
+        divergence_signal = "NEUTRAL"
+        smart_money_bias = "neutral"
+
+    acc_pos_gap = abs(top_acc_ratio - top_pos_ratio)
+    return {
+        "top_accounts_long_pct": round(top_acc_l, 4),
+        "top_accounts_short_pct": round(top_acc_s, 4),
+        "top_accounts_ratio": round(top_acc_ratio, 4),
+        "top_positions_long_pct": round(top_pos_l, 4),
+        "top_positions_ratio": round(top_pos_ratio, 4),
+        "global_long_pct": round(global_l, 4),
+        "global_short_pct": round(global_s, 4),
+        "global_ratio": round(global_ratio, 4),
+        "divergence": divergence,
+        "divergence_signal": divergence_signal,
+        "smart_money_bias": smart_money_bias,
+        "conviction": "LOW" if acc_pos_gap > 0.5 else "HIGH",
+        "acc_pos_gap": round(acc_pos_gap, 4),
+    }
+
+
+def fetch_oi_momentum(btc_spot: float) -> dict:
+    """Combine the 15-minute OI change with recent local price direction."""
+    base = "https://fapi.binance.com"
+    oi_r = _fetch_json(f"{base}/fapi/v1/openInterest?symbol=BTCUSDT")
+    hist_r = _fetch_json(
+        f"{base}/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=3"
+    )
+    if not isinstance(oi_r, dict):
+        return {}
+
+    try:
+        oi_btc = float(oi_r.get("openInterest", 0) or 0)
+        oi_usd = oi_btc * btc_spot if btc_spot > 0 else 0.0
+    except (TypeError, ValueError):
+        oi_btc = 0.0
+        oi_usd = 0.0
+
+    oi_delta_pct = 0.0
+    if isinstance(hist_r, list) and len(hist_r) >= 2:
+        try:
+            newest = float(hist_r[-1].get("sumOpenInterest", 0) or 0)
+            oldest = float(hist_r[0].get("sumOpenInterest", 0) or 0)
+            if oldest > 0:
+                oi_delta_pct = (newest - oldest) / oldest * 100
+        except (AttributeError, TypeError, ValueError, IndexError):
+            pass
+
+    price_dir = "neutral"
+    try:
+        raw = subprocess.getoutput("tail -2 data/bias_context.jsonl 2>/dev/null")
+        lines = [line for line in raw.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            newest_price = float(json.loads(lines[-1]).get("current_price", 0) or 0)
+            oldest_price = float(json.loads(lines[-2]).get("current_price", 0) or 0)
+            if oldest_price > 0:
+                price_change = (newest_price - oldest_price) / oldest_price
+                if price_change > 0.001:
+                    price_dir = "up"
+                elif price_change < -0.001:
+                    price_dir = "down"
+    except Exception:
+        pass
+
+    oi_dir = "up" if oi_delta_pct > 0.1 else "down" if oi_delta_pct < -0.1 else "flat"
+    regimes = {
+        ("up", "up"): "STRONG_LONG_MOMENTUM",
+        ("up", "down"): "SHORT_COVERING",
+        ("down", "up"): "STRONG_SHORT_MOMENTUM",
+        ("down", "down"): "LONG_UNWINDING",
+    }
+    return {
+        "oi_btc": round(oi_btc, 2),
+        "oi_usd_m": round(oi_usd / 1e6, 1) if oi_usd > 0 else None,
+        "oi_delta_pct": round(oi_delta_pct, 4),
+        "oi_dir": oi_dir,
+        "price_dir": price_dir,
+        "price_oi_regime": regimes.get((price_dir, oi_dir), "NEUTRAL"),
+    }
+
+
+def fetch_ls_trend() -> dict:
+    """Measure the 30-minute trend in Binance global long participation."""
+    base = "https://fapi.binance.com/futures/data"
+    hist = _fetch_json(
+        f"{base}/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=6"
+    )
+    if not isinstance(hist, list) or len(hist) < 3:
+        return {}
+
+    try:
+        ratios = [float(row.get("longAccount", 0) or 0) for row in hist]
+        change = (sum(ratios[-2:]) / 2) - (sum(ratios[:2]) / 2)
+        if change > 0.03:
+            trend = "LONGS_INCREASING"
+            momentum = "STRONG" if change > 0.07 else "WEAK"
+        elif change < -0.03:
+            trend = "SHORTS_INCREASING"
+            momentum = "STRONG" if change < -0.07 else "WEAK"
+        else:
+            trend = "STABLE"
+            momentum = "WEAK"
+        return {
+            "ls_trend": trend,
+            "ls_momentum": momentum,
+            "ls_change_30m": round(change, 4),
+            "current_long_pct": round(ratios[-1], 4),
+        }
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return {}
+
+
 def run_once() -> None:
     ts = int(time.time() * 1000)
     cache = _read_cache()
@@ -323,10 +487,24 @@ def run_once() -> None:
     if not etf.get("etfs"):
         etf = cache.get("etf") or etf
 
-    classification = classify_move(basis, coinbase, kraken, etf)
     netflow = fetch_spot_netflow_proxy() or {}
     if netflow.get("netflow_signal") is None:
         netflow = cache.get("netflow_proxy") or netflow
+
+    top_trader = fetch_top_trader_divergence() or cache.get("top_trader") or {}
+    oi_momentum = fetch_oi_momentum(spot_price) or cache.get("oi_momentum") or {}
+    ls_trend = fetch_ls_trend() or cache.get("ls_trend") or {}
+
+    classification = classify_move(basis, coinbase, kraken, etf)
+    smart_bias = top_trader.get("smart_money_bias", "neutral")
+    directional_bias = classification.get("directional_bias", "neutral")
+    if smart_bias != "neutral" and smart_bias == directional_bias:
+        classification["smart_money_confirmation"] = True
+        classification["move_confidence"] = "HIGH"
+    elif smart_bias != "neutral" and smart_bias != directional_bias:
+        classification["smart_money_confirmation"] = False
+        if classification.get("move_confidence") == "HIGH":
+            classification["move_confidence"] = "MEDIUM"
 
     result = {
         "engine": "macro_context_engine",
@@ -337,10 +515,18 @@ def run_once() -> None:
         "multi_exchange": kraken,
         "etf": etf,
         "netflow_proxy": netflow,
+        "top_trader": top_trader,
+        "oi_momentum": oi_momentum,
+        "ls_trend": ls_trend,
         "classification": classification,
         "move_type": classification.get("move_type"),
         "directional_bias": classification.get("directional_bias"),
         "signal_reliability": classification.get("signal_reliability"),
+        "smart_money_bias": smart_bias,
+        "smart_money_conviction": top_trader.get("conviction", "HIGH"),
+        "divergence_signal": top_trader.get("divergence_signal", "NEUTRAL"),
+        "price_oi_regime": oi_momentum.get("price_oi_regime", "NEUTRAL"),
+        "ls_trend_signal": ls_trend.get("ls_trend", "STABLE"),
         "etf_signal": etf.get("etf_signal", "NEUTRAL"),
         "coinbase_signal": coinbase.get("premium_signal", "NEUTRAL"),
         "basis_signal": basis.get("basis_signal", "NEUTRAL"),
@@ -350,9 +536,11 @@ def run_once() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MACRO_FILE.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(
-        f"[MACRO] {result['move_type']} | reliability={result['signal_reliability']} | "
-        f"coinbase={result['coinbase_signal']} | etf={result['etf_signal']} | "
-        f"basis={result['basis_signal']} | bias={result['directional_bias']}",
+        f"[MACRO] {result['move_type']} | smart_money={smart_bias} "
+        f"({top_trader.get('conviction', '?')}) | "
+        f"divergence={top_trader.get('divergence_signal', '?')} | "
+        f"OI_regime={oi_momentum.get('price_oi_regime', '?')} | "
+        f"reliability={result['signal_reliability']}",
         flush=True,
     )
 
