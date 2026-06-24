@@ -79,7 +79,7 @@ def load_price_rows():
     candidates = []
 
     for pf in PRICE_FILES:
-        rows = read_jsonl_tail(pf, 120000)
+        rows = read_jsonl_tail(pf, 500)
         usable = []
         missing_hl = 0
 
@@ -139,7 +139,7 @@ def is_open(row):
 
 def already_valid_closed_ids():
     ids = set()
-    for r in read_jsonl_tail(PAPER, 100000) + read_jsonl_tail(CLOSED_JSONL, 100000):
+    for r in read_jsonl_tail(PAPER, 500) + read_jsonl_tail(CLOSED_JSONL, 500):
         sid = sid_of(r)
         if sid and is_valid_closed(r):
             ids.add(sid)
@@ -149,7 +149,7 @@ def open_paper_rows():
     valid_closed = already_valid_closed_ids()
     opens = {}
 
-    for r in read_jsonl_tail(PAPER, 100000):
+    for r in read_jsonl_tail(PAPER, 500):
         sid = sid_of(r)
         if not sid or sid in valid_closed:
             continue
@@ -322,4 +322,14 @@ def main():
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--live":
+        print("[CLOSE] Live mode - 60s interval", flush=True)
+        while True:
+            try:
+                main()
+            except Exception as e:
+                print(f"[CLOSE] Error: {e}", flush=True)
+            time.sleep(60)
+    else:
+        main()

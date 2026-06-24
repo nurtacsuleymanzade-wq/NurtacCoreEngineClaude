@@ -18,6 +18,7 @@ ENGINES = [
     ("observer", "observer_engine.py --mode live"),
     ("scenario", "scenario_engine.py --mode live"),
     ("paper_trade", "paper_trade_engine.py --mode live"),
+    ("paper_close", "tools/paper_close_engine.py --live"),
     ("validator", "validator.py"),
     ("market_context", "market_context_engine.py"),
     ("detector",       "detector_engine.py --mode live"),
