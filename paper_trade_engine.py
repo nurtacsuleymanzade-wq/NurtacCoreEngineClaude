@@ -39,6 +39,14 @@ HEALTH_INTERVAL_S = 30.0
 OPEN_INTERVAL_S   = 10.0
 SUMMARY_INTERVAL_S = 10.0
 POLL_SLEEP        = 0.5
+INITIAL_BALANCE_USD = 500.0
+
+TIER_RISK_PCT = {
+    "L1_LOW": 0.01,
+    "L2_MEDIUM": 0.02,
+    "L3_GOOD_A+": 0.03,
+    "L4_PREMIUM": 0.05,
+}
 
 # ── Timeout bars per timeframe/setup_type ────────────────────────────────────
 def _max_bars(setup_type: str, timeframe_source: str) -> int:
@@ -62,6 +70,7 @@ TRADES_FILE   = DATA_DIR / "paper_trades.jsonl"
 OPEN_FILE     = DATA_DIR / "paper_trades_open.json"
 SUMMARY_FILE  = DATA_DIR / "paper_trade_summary.json"
 HEALTH_FILE   = DATA_DIR / "paper_trade_health.json"
+PORTFOLIO_FILE = DATA_DIR / "portfolio_sim.json"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -118,6 +127,45 @@ def _append_jsonl(path: Path, rec: dict) -> None:
     except OSError:
         pass
 
+def calc_position_size(balance: float, tier: str, sl_pct: float,
+                       entry_price: float = 0.0) -> dict:
+    risk_pct = TIER_RISK_PCT.get(tier, 0.01)
+    risk_usd = balance * risk_pct
+    if sl_pct <= 0 or entry_price <= 0:
+        return {
+            "risk_usd": round(risk_usd, 2),
+            "position_usd": 0.0,
+            "contracts": 0.0,
+            "leverage_approx": 0.0,
+        }
+    position_usd = risk_usd / sl_pct
+    contracts = position_usd / entry_price
+    return {
+        "risk_usd": round(risk_usd, 2),
+        "position_usd": round(position_usd, 2),
+        "contracts": round(contracts, 6),
+        "leverage_approx": round(position_usd / balance, 1) if balance > 0 else 0.0,
+    }
+
+def calc_pnl_usd(trade: dict, close_price: float) -> dict:
+    entry = _sf(trade.get("entry_price", trade.get("open_price", 0)), 0.0)
+    contracts = _sf((trade.get("sim") or {}).get("contracts"), 0.0)
+    risk_usd = _sf((trade.get("sim") or {}).get("risk_usd"), 0.0)
+    direction = trade.get("direction")
+    if entry <= 0 or close_price <= 0 or direction not in ("long", "short"):
+        return {"pnl_usd": 0.0, "pnl_pct": 0.0, "rr_actual": 0.0}
+    if direction == "long":
+        pnl_pct = (close_price - entry) / entry
+    else:
+        pnl_pct = (entry - close_price) / entry
+    pnl_usd = contracts * entry * pnl_pct
+    rr = pnl_usd / risk_usd if risk_usd > 0 else 0.0
+    return {
+        "pnl_usd": round(pnl_usd, 2),
+        "pnl_pct": round(pnl_pct * 100, 3),
+        "rr_actual": round(rr, 2),
+    }
+
 # ── Timeframe source inference ────────────────────────────────────────────────
 def _infer_timeframe(setup: dict) -> str:
     st  = setup.get("setup_type", "")
@@ -148,6 +196,78 @@ class TradeState:
         self.consec_losses:       int = 0
         self.max_consec_wins:     int = 0
         self.max_consec_losses:   int = 0
+
+def _simulated_trades(state: TradeState) -> list[dict]:
+    return [
+        trade for trade in state.completed_trades
+        if isinstance(trade.get("sim"), dict)
+        and trade.get("sim", {}).get("pnl_usd") is not None
+    ]
+
+def _current_balance(state: TradeState) -> float:
+    pnl = sum(_sf(trade.get("sim", {}).get("pnl_usd"), 0.0)
+              for trade in _simulated_trades(state))
+    return round(INITIAL_BALANCE_USD + pnl, 2)
+
+def _portfolio_group(trades: list[dict]) -> dict:
+    wins = sum(1 for trade in trades if _sf(trade.get("sim", {}).get("pnl_usd"), 0.0) > 0)
+    pnl = sum(_sf(trade.get("sim", {}).get("pnl_usd"), 0.0) for trade in trades)
+    count = len(trades)
+    return {
+        "trades": count,
+        "wr": round(wins / count * 100, 1) if count else 0.0,
+        "pnl_usd": round(pnl, 2),
+    }
+
+def _write_portfolio(state: TradeState) -> None:
+    trades = _simulated_trades(state)
+    pnls = [_sf(trade.get("sim", {}).get("pnl_usd"), 0.0) for trade in trades]
+    rrs = [_sf(trade.get("sim", {}).get("rr_actual"), 0.0) for trade in trades]
+    wins = sum(1 for pnl in pnls if pnl > 0)
+    losses = sum(1 for pnl in pnls if pnl < 0)
+    breakeven = len(pnls) - wins - losses
+
+    equity = INITIAL_BALANCE_USD
+    peak = equity
+    max_drawdown = 0.0
+    for pnl in pnls:
+        equity += pnl
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+
+    grouped: dict[str, dict[str, list[dict]]] = {
+        "by_tier": defaultdict(list),
+        "by_regime": defaultdict(list),
+        "by_session": defaultdict(list),
+    }
+    for trade in trades:
+        sim = trade.get("sim") or {}
+        context = trade.get("context_at_open") or {}
+        grouped.get("by_tier", {})[sim.get("tier", "L1_LOW")].append(trade)
+        grouped.get("by_regime", {})[context.get("regime") or "UNKNOWN"].append(trade)
+        grouped.get("by_session", {})[context.get("session") or "UNKNOWN"].append(trade)
+
+    total_pnl = round(sum(pnls), 2)
+    payload = {
+        "initial_balance": INITIAL_BALANCE_USD,
+        "current_balance": round(INITIAL_BALANCE_USD + total_pnl, 2),
+        "total_pnl_usd": total_pnl,
+        "total_pnl_pct": round(total_pnl / INITIAL_BALANCE_USD * 100, 2),
+        "total_trades": len(trades),
+        "winning_trades": wins,
+        "losing_trades": losses,
+        "breakeven_trades": breakeven,
+        "win_rate_pct": round(wins / len(trades) * 100, 1) if trades else 0.0,
+        "avg_rr": round(sum(rrs) / len(rrs), 2) if rrs else 0.0,
+        "max_drawdown_usd": round(max_drawdown, 2),
+        "best_trade_usd": round(max(pnls), 2) if pnls else 0.0,
+        "worst_trade_usd": round(min(pnls), 2) if pnls else 0.0,
+        "by_tier": {key: _portfolio_group(value) for key, value in grouped.get("by_tier", {}).items()},
+        "by_regime": {key: _portfolio_group(value) for key, value in grouped.get("by_regime", {}).items()},
+        "by_session": {key: _portfolio_group(value) for key, value in grouped.get("by_session", {}).items()},
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+    }
+    _safe_write_json(PORTFOLIO_FILE, payload)
 
 # ── Open a paper trade ────────────────────────────────────────────────────────
 
@@ -235,8 +355,14 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     tp2_price = _sf(tgt_obj.get("tp2"),        0.0)
     tp3_price = _sf(tgt_obj.get("tp3"),        0.0)
     setup_type      = setup.get("setup_type", "normal")
+    quality_tier    = setup.get("quality_tier", "L1_LOW")
     timeframe_source = _infer_timeframe(setup)
     open_ts   = setup.get("qualification_ts") or int(time.time() * 1000)
+    sl_pct = abs(open_price - sl_price) / open_price if open_price > 0 else 0.0
+    sim = calc_position_size(
+        _current_balance(state), quality_tier, sl_pct, open_price,
+    )
+    sim["tier"] = quality_tier
 
     trade = {
         "trade_id":        str(uuid.uuid4()),
@@ -248,6 +374,7 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
 
         "open_ts":    open_ts,
         "open_price": open_price,
+        "entry_price": open_price,
 
         "sl_price":   sl_price,
         "sl_original": sl_price,
@@ -273,6 +400,7 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
         "pnl_r":   None,
         "pnl_pct": None,
         "outcome": None,
+        "sim": sim,
 
         "duration_seconds": None,
         "bars_held":        0,
@@ -285,6 +413,10 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
             "trend_1m":      ctx_obj.get("trend_1m"),
             "market_bias":   ctx_obj.get("market_bias"),
             "profile_shape": ctx_obj.get("profile_shape"),
+            "regime":        setup.get("regime_at_qualification"),
+            "session":       setup.get("session_at_qualification"),
+            "volatility":    setup.get("volatility_at_qualification"),
+            "entry_timing":  setup.get("entry_timing"),
         },
 
         "market_questions": setup.get("market_questions") or {},
@@ -480,6 +612,8 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
 
     trade["pnl_pct"] = round(pnl_pct, 6)
     trade["pnl_r"]   = round(pnl_r, 6)
+    sim_result = calc_pnl_usd(trade, close_price)
+    trade.setdefault("sim", {}).update(sim_result)
 
     # outcome
     if reason == "sl_hit":
@@ -564,6 +698,7 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
 
         "context_at_open":  trade["context_at_open"],
         "market_questions": trade["market_questions"],
+        "sim":              trade.get("sim", {}),
 
         "validation": {
             "sl_valid":           sl_original > 0,
@@ -585,6 +720,7 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
 
     _print_close(rec)
     _write_summary(state)
+    _write_portfolio(state)
 
 
 # ── Summary computation ───────────────────────────────────────────────────────
@@ -706,6 +842,7 @@ def _write_open_positions(state: TradeState) -> None:
             "stop_moved_to_breakeven":  trade["stop_moved_to_breakeven"],
             "scenario":                 (trade["context_at_open"] or {}).get("scenario"),
             "gate_grade":               (trade["context_at_open"] or {}).get("gate_grade"),
+            "sim":                      trade.get("sim", {}),
         })
     _safe_write_json(OPEN_FILE, {
         "generated_at": time.time(),
@@ -991,6 +1128,7 @@ def run_batch() -> None:
     _write_health(state)
     _write_open_positions(state)
     _write_summary(state)
+    _write_portfolio(state)
     _print_summary(state)
     print(f"[PAPER] Batch done — opened={state.total_opened} "
           f"closed={state.total_closed}", flush=True)
@@ -1118,6 +1256,7 @@ async def run_live() -> None:
     _write_health(state)
     _write_open_positions(state)
     _write_summary(state)
+    _write_portfolio(state)
     print("[PAPER] Paper Trade Engine başlatıldı (live mode)", flush=True)
 
     with open(TRADES_FILE, "a", encoding="utf-8") as trades_fh:
