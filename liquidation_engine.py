@@ -635,25 +635,30 @@ async def _websocket_loop(
                     stream = str(envelope.get("stream", ""))
                     stream_lower = stream.lower()
                     data = envelope.get("data") or {}
+                    event_type = str(data.get("e", "")).lower()
                     state.update({
                         "messages_seen": int(state.get("messages_seen", 0)) + 1,
                         "last_message_ts": int(time.time() * 1000),
                     })
                     if int(state.get("messages_seen", 0)) == 1:
                         _write_health(state, "OK")
-                    if stream_lower.endswith("@aggtrade"):
+                    if event_type == "aggtrade" or stream_lower.endswith("@aggtrade"):
                         price = process_agg_trade(data, footprint)
                         process_whale_trade(data, whale_trade_window)
                         if price > 0:
                             state.update({"current_price": price})
-                    elif "@depth20" in stream_lower:
+                    elif event_type == "depthupdate" or "@depth20" in stream_lower:
                         walls.process_depth(data)
+                        if _sf(state.get("current_price")) <= 0 and walls.bids and walls.asks:
+                            state.update({
+                                "current_price": (max(walls.bids) + min(walls.asks)) / 2,
+                            })
                         whale_orders.process_depth_update(
                             walls.bids, walls.asks,
                             _sf(state.get("current_price")),
                             _sf(state.get("current_price")),
                         )
-                    elif stream_lower.endswith("@forceorder"):
+                    elif event_type == "forceorder" or stream_lower.endswith("@forceorder"):
                         process_force_order(data)
         except Exception as error:
             state.update({"connected": False})
