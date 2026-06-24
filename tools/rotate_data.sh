@@ -42,6 +42,10 @@ files = {
     "liquidation_clusters.jsonl": 500,
     "real_liquidations.jsonl": 5000,
     "orderbook_walls.jsonl": 1000,
+    "whale_trades.jsonl": 5000,
+    "whale_trade_summary.jsonl": 500,
+    "whale_orders.jsonl": 2000,
+    "orderbook_stats.jsonl": 1000,
     "footprint_dna_btcusdt.jsonl": 2000,
 }
 
