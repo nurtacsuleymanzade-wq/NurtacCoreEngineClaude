@@ -223,8 +223,16 @@ def flush_footprint(footprint: dict[float, dict], current_price: float) -> dict:
 def calc_liquidation_clusters(
     current_price: float, open_interest_usd: float, funding_rate: float,
 ) -> dict:
-    clusters_long: dict[float, float] = {}
-    clusters_short: dict[float, float] = {}
+    tier_names = {
+        (5,): "LOW",
+        (10, 20): "MEDIUM",
+        (50, 100): "HIGH",
+    }
+    clusters_by_tier: dict[str, dict[str, dict[float, float]]] = {
+        "LOW": {"long": {}, "short": {}},
+        "MEDIUM": {"long": {}, "short": {}},
+        "HIGH": {"long": {}, "short": {}},
+    }
     if funding_rate > 0:
         long_oi, short_oi = open_interest_usd * 0.55, open_interest_usd * 0.45
     elif funding_rate < 0:
@@ -241,19 +249,45 @@ def calc_liquidation_clusters(
         short_bucket = price_to_bucket(
             current_price * (1 + liquidation_margin - maintenance_margin),
         )
-        clusters_long.update({long_bucket: clusters_long.get(long_bucket, 0.0) + long_oi * pct})
-        clusters_short.update({short_bucket: clusters_short.get(short_bucket, 0.0) + short_oi * pct})
+        tier = next(
+            (name for leverages, name in tier_names.items() if leverage in leverages),
+            "HIGH",
+        )
+        tier_long = clusters_by_tier.get(tier, {}).get("long", {})
+        tier_short = clusters_by_tier.get(tier, {}).get("short", {})
+        tier_long[long_bucket] = tier_long.get(long_bucket, 0.0) + long_oi * pct
+        tier_short[short_bucket] = tier_short.get(short_bucket, 0.0) + short_oi * pct
 
-    top_long = sorted(
-        ({"price": price, "usd_at_risk": round(value / 1e6, 2), "side": "long"}
-         for price, value in clusters_long.items()),
-        key=lambda item: _sf(item.get("usd_at_risk")), reverse=True,
-    )[:10]
-    top_short = sorted(
-        ({"price": price, "usd_at_risk": round(value / 1e6, 2), "side": "short"}
-         for price, value in clusters_short.items()),
-        key=lambda item: _sf(item.get("usd_at_risk")), reverse=True,
-    )[:10]
+    clusters_long: dict[float, float] = {}
+    clusters_short: dict[float, float] = {}
+    for tier_data in clusters_by_tier.values():
+        for price, value in tier_data.get("long", {}).items():
+            clusters_long[price] = clusters_long.get(price, 0.0) + value
+        for price, value in tier_data.get("short", {}).items():
+            clusters_short[price] = clusters_short.get(price, 0.0) + value
+
+    def build_top(side: str, clusters: dict[float, float]) -> list[dict]:
+        result: list[dict] = []
+        for price, value in sorted(
+            clusters.items(), key=lambda item: item[1], reverse=True,
+        )[:10]:
+            dominant_tier = max(
+                ("LOW", "MEDIUM", "HIGH"),
+                key=lambda tier: clusters_by_tier.get(tier, {}).get(
+                    side, {},
+                ).get(price, 0.0),
+            )
+            result.append({
+                "price": price,
+                "usd_at_risk": round(value / 1e6, 2),
+                "side": side,
+                "leverage_tier": dominant_tier,
+                "cascade_capable": dominant_tier in ("MEDIUM", "HIGH"),
+            })
+        return result
+
+    top_long = build_top("long", clusters_long)
+    top_short = build_top("short", clusters_short)
 
     all_clusters = top_long + top_short
     max_usd = max(
@@ -312,6 +346,25 @@ def calc_liquidation_clusters(
         "hot_short_clusters": hot_short,
         "liquidity_threshold": liquidity_threshold,
         "max_cluster_usd_m": round(max_usd, 2),
+        "by_tier": {
+            tier: {
+                side_key: sorted(
+                    [
+                        {"price": price, "usd_m": round(value / 1e6, 2)}
+                        for price, value in clusters_by_tier.get(tier, {}).get(
+                            side, {},
+                        ).items()
+                    ],
+                    key=lambda item: _sf(item.get("usd_m")),
+                    reverse=True,
+                )[:5]
+                for side, side_key in (
+                    ("long", "long_clusters"),
+                    ("short", "short_clusters"),
+                )
+            }
+            for tier in ("HIGH", "MEDIUM")
+        },
     }
 
 
