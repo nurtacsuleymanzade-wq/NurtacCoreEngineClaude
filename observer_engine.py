@@ -279,7 +279,7 @@ class ObservedSetup:
 
         vp_loc  = (vp1m or {}).get("location") or {}
         vp_prof = (vp1m or {}).get("profile")  or {}
-        cur_loc = vp_loc.get("position")
+        cur_loc = (vp_loc.get("location") or vp_loc).get("position")
         poc     = _sf(vp_prof.get("poc"), 0.0)
         vah     = _sf(vp_prof.get("vah"), 0.0)
         val     = _sf(vp_prof.get("val"), 0.0)
