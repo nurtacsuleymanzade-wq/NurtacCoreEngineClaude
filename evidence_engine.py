@@ -53,6 +53,7 @@ ORDERBOOK_WALL_FILE = DATA_DIR / "orderbook_walls.jsonl"
 WHALE_SUMMARY_FILE = DATA_DIR / "whale_trade_summary.jsonl"
 ORDERBOOK_STATS_FILE = DATA_DIR / "orderbook_stats.jsonl"
 WHALE_ORDER_FILE = DATA_DIR / "whale_orders.jsonl"
+MAX_PAIN_FILE = DATA_DIR / "max_pain.json"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -819,6 +820,44 @@ def compute_evidence(
         "nearest_liq_short": nearby_short[0].get("price") if nearby_short else None,
     }
 
+    # ── J. Deribit max pain and options/futures regime ─────────────────────
+    try:
+        max_pain = (
+            json.loads(MAX_PAIN_FILE.read_text(encoding="utf-8"))
+            if MAX_PAIN_FILE.exists() else {}
+        )
+    except Exception:
+        max_pain = {}
+    mp_bias = max_pain.get("mp_bias", "neutral")
+    mp_proximity = max_pain.get("expiry_proximity", "LOW")
+    options_futures = max_pain.get("options_futures_ratio") or {}
+    signal_confidence = options_futures.get("signal_confidence", "HIGH")
+
+    if signal_confidence == "LOW":
+        long_score *= 0.5
+        short_score *= 0.5
+        score_breakdown["options_dominant_penalty"] = -0.5
+
+    mp_boost = 1.0 if mp_proximity == "HIGH" else 0.5
+    if mp_bias == "bullish":
+        long_score += mp_boost
+        short_score -= mp_boost * 0.5
+        score_breakdown["max_pain_long"] = mp_boost
+        score_breakdown["max_pain_counter_short"] = -(mp_boost * 0.5)
+    elif mp_bias == "bearish":
+        short_score += mp_boost
+        long_score -= mp_boost * 0.5
+        score_breakdown["max_pain_short"] = mp_boost
+        score_breakdown["max_pain_counter_long"] = -(mp_boost * 0.5)
+    comps["max_pain_context"] = {
+        "available": bool(max_pain),
+        "max_pain_price": max_pain.get("max_pain_price"),
+        "bias": mp_bias,
+        "expiry_proximity": mp_proximity,
+        "options_futures_regime": options_futures.get("regime"),
+        "signal_confidence": signal_confidence,
+    }
+
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
     short_score = max(0.0, short_score)
@@ -857,6 +896,7 @@ def compute_evidence(
             "orderbook_walls": bool(walls),
             "whale_trade_summary": bool(whale_summary),
             "orderbook_stats": bool(orderbook_stats),
+            "max_pain": bool(max_pain),
         },
     }
 
