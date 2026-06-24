@@ -48,6 +48,8 @@ STRUCT_1M_FILE = DATA_DIR / "structure_1m.jsonl"
 STRUCT_5M_FILE = DATA_DIR / "structure_5m.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
 REGIME_FILE    = DATA_DIR / "regime_context.jsonl"
+LIQ_CLUSTER_FILE = DATA_DIR / "liquidation_clusters.jsonl"
+ORDERBOOK_WALL_FILE = DATA_DIR / "orderbook_walls.jsonl"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -237,7 +239,7 @@ def _build_exact_index(records: list[dict]) -> dict[int, dict]:
     """Index records by window_start_ts. Latest record wins on duplicate ts."""
     idx: dict[int, dict] = {}
     for rec in records:
-        ts = rec.get("window_start_ts")
+        ts = rec.get("window_start_ts", rec.get("ts"))
         if ts is not None:
             idx[int(ts)] = rec
     return idx
@@ -414,6 +416,8 @@ def compute_evidence(
     s5m:     dict | None,
     det_recs: dict[str, dict | None],
     baseline: dict | None,
+    liquidation: dict | None = None,
+    walls: dict | None = None,
 ) -> dict:
     """Compute long_score and short_score for one 1S bar."""
     long_score  = 0.0
@@ -653,11 +657,7 @@ def compute_evidence(
     _sc_file = DATA_DIR / "scenarios.jsonl"
     if _sc_file.exists():
         try:
-            _sc_last = ""
-            with open(_sc_file, "r", encoding="utf-8") as _scf:
-                for _scl in _scf:
-                    if _scl.strip():
-                        _sc_last = _scl.strip()
+            _sc_last = subprocess.getoutput(f"tail -1 {_sc_file}").strip()
             if _sc_last:
                 _sc_rec = json.loads(_sc_last)
                 _dom    = _sc_rec.get("dominant_scenario")
@@ -708,6 +708,57 @@ def compute_evidence(
     score_breakdown["scenario_long"]  = round(long_score  - _pre_long,  4)
     score_breakdown["scenario_short"] = round(short_score - _pre_short, 4)
 
+    # ── I. Liquidation magnets and blocking order-book walls ────────────────
+    current_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
+    liquidation = liquidation or {}
+    nearby_long = liquidation.get("nearby_long_clusters") or []
+    nearby_short = liquidation.get("nearby_short_clusters") or []
+    has_liq_magnet_below = any(
+        _sf(cluster.get("usd_at_risk")) > 30
+        and _sf(cluster.get("price")) < current_price
+        for cluster in nearby_long
+    )
+    has_liq_magnet_above = any(
+        _sf(cluster.get("usd_at_risk")) > 30
+        and _sf(cluster.get("price")) > current_price
+        for cluster in nearby_short
+    )
+    if has_liq_magnet_above:
+        long_score += 1.0
+        score_breakdown["liq_magnet_long"] = 1.0
+    if has_liq_magnet_below:
+        short_score += 1.0
+        score_breakdown["liq_magnet_short"] = 1.0
+
+    walls = walls or {}
+    nearest_ask = walls.get("nearest_ask_wall") or {}
+    nearest_bid = walls.get("nearest_bid_wall") or {}
+    wall_blocking_long = (
+        bool(nearest_ask)
+        and _sf(nearest_ask.get("distance_pct"), 999.0) < 0.5
+        and _sf(nearest_ask.get("qty_btc")) > 20
+    )
+    wall_blocking_short = (
+        bool(nearest_bid)
+        and _sf(nearest_bid.get("distance_pct"), 999.0) < 0.5
+        and _sf(nearest_bid.get("qty_btc")) > 20
+    )
+    if wall_blocking_long:
+        long_score -= 0.5
+        score_breakdown["wall_blocking_long"] = -0.5
+    if wall_blocking_short:
+        short_score -= 0.5
+        score_breakdown["wall_blocking_short"] = -0.5
+    comps["liquidation_context"] = {
+        "available": bool(liquidation),
+        "cascade_risk": liquidation.get("cascade_risk"),
+        "liq_magnet_below": has_liq_magnet_below,
+        "liq_magnet_above": has_liq_magnet_above,
+        "walls_available": bool(walls),
+        "wall_blocking_long": wall_blocking_long,
+        "wall_blocking_short": wall_blocking_short,
+    }
+
     # Clamp to ≥ 0 (multiplication shouldn't go negative, but guard)
     long_score  = max(0.0, long_score)
     short_score = max(0.0, short_score)
@@ -742,6 +793,8 @@ def compute_evidence(
             "structure_1m": s1m is not None,
             "structure_5m": s5m is not None,
             "baseline":    baseline is not None,
+            "liquidation_clusters": bool(liquidation),
+            "orderbook_walls": bool(walls),
         },
     }
 
@@ -1146,6 +1199,8 @@ def run_batch() -> None:
         for rec in _read_last_n_lines(REGIME_FILE, 200)
         if rec.get("ts") is not None
     }
+    liq_idx = _build_exact_index(_read_last_n_lines(LIQ_CLUSTER_FILE, 200))
+    wall_idx = _build_exact_index(_read_last_n_lines(ORDERBOOK_WALL_FILE, 200))
 
     # Baseline: latest record per timeframe
     baseline_1m: dict | None = None
@@ -1180,8 +1235,13 @@ def run_batch() -> None:
             s5m     = _get_latest_at_or_before(s5m_idx, ts)
             det_rec = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
             regime  = _get_latest_at_or_before(regime_idx, ts)
+            liquidation = _get_latest_at_or_before(liq_idx, ts)
+            walls = _get_latest_at_or_before(wall_idx, ts)
 
-            ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, baseline_1m)
+            ev = compute_evidence(
+                raw, gate, s1s, s1m, s5m, det_rec, baseline_1m,
+                liquidation, walls,
+            )
 
             errs = _validate_evidence(ev)
             if errs:
@@ -1208,6 +1268,8 @@ class LiveCtx:
         self.s5m:  dict[int, dict]  = {}
         self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
         self.regime: dict[int, dict] = {}
+        self.liquidation: dict[int, dict] = {}
+        self.walls: dict[int, dict] = {}
         self.baseline_1m: dict | None = None
         self.setup_state = SetupState()
 
@@ -1370,8 +1432,13 @@ async def _primary_task(ctx: LiveCtx) -> None:
             s5m     = _get_latest_at_or_before(ctx.s5m, ts)
             det_rec = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
             regime  = _get_latest_at_or_before(ctx.regime, ts)
+            liquidation = _get_latest_at_or_before(ctx.liquidation, ts)
+            walls = _get_latest_at_or_before(ctx.walls, ts)
 
-            ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m)
+            ev = compute_evidence(
+                raw, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m,
+                liquidation, walls,
+            )
 
             errs = _validate_evidence(ev)
             if errs:
@@ -1395,6 +1462,8 @@ async def run_live() -> None:
         asyncio.create_task(_tail_secondary_file(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="ev-s1m"),
         asyncio.create_task(_tail_secondary_file(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="ev-s5m"),
         asyncio.create_task(_tail_secondary_file(REGIME_FILE, ctx.regime, "regime"), name="ev-regime"),
+        asyncio.create_task(_tail_secondary_file(LIQ_CLUSTER_FILE, ctx.liquidation, "liquidation"), name="ev-liquidation"),
+        asyncio.create_task(_tail_secondary_file(ORDERBOOK_WALL_FILE, ctx.walls, "walls"), name="ev-walls"),
         asyncio.create_task(_tail_secondary_file(BASELINE_FILE,  {},      "bl",
                                                  ctx=ctx, is_baseline=True),       name="ev-bl"),
     ]
