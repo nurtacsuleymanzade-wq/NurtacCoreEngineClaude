@@ -38,6 +38,7 @@ QUALIFIED_FILE    = DATA_DIR / "qualified_setups.jsonl"
 
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 SETUPS_FILE    = DATA_DIR / "setups.jsonl"
+LIQ_SETUPS_FILE = DATA_DIR / "liquidation_setups.jsonl"
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 
 STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
@@ -177,6 +178,10 @@ class ObservedSetup:
         self.entry_timing = setup.get("entry_timing", "unknown")
         self.source_setup = setup
         self.opened_ts    = opened_ts
+        self.waiting_timeout_ms = (
+            30_000 if self.setup_type == "liq_cascade_reversal"
+            else WAITING_TIMEOUT_MS
+        )
 
         e  = setup.get("entry") or {}
         sl = setup.get("sl")    or {}
@@ -337,9 +342,10 @@ class ObservedSetup:
             return False
 
         # ── 2. Phase timeouts ─────────────────────────────────────────────────
-        if self.state == "WAITING" and ts >= self.opened_ts + WAITING_TIMEOUT_MS:
+        if self.state == "WAITING" and ts >= self.opened_ts + self.waiting_timeout_ms:
+            timeout_seconds = self.waiting_timeout_ms // 1000
             self._transition(ts, "EXPIRED", "WAITING_TIMEOUT",
-                             "No events in 60s", cur_price, obs_fh)
+                             f"No events in {timeout_seconds}s", cur_price, obs_fh)
             return False
 
         if (self.state == "DEVELOPING" and self.developing_start_ts is not None and
@@ -644,6 +650,11 @@ class ObservedSetup:
             f4 = dom_scen_dir in ("bearish", "neutral")
             f5 = dom_bias in ("short", "neutral")
 
+        if self.setup_type.startswith("liq_"):
+            f3 = True
+        if self.setup_type == "liq_cascade_reversal":
+            f4 = True
+
         return {
             "F0_regime_compatible": f0,
             "F1_delta_aligned":     f1,
@@ -905,6 +916,12 @@ class SetupTracker:
                             "Max 10 concurrent setups reached", 0.0, obs_fh)
 
         self.active[sid] = ObservedSetup(setup, ts)
+        if str(setup.get("setup_type", "")).startswith("liq_"):
+            print(
+                f"[OBS LIQ SETUP] tracking {setup.get('setup_type')} "
+                f"setup_id={sid} timeout_ms={self.active.get(sid).waiting_timeout_ms}",
+                flush=True,
+            )
 
     def process_bar(self, ts: int, primary: dict, s1s: dict | None,
                     s1m: dict | None, vp1m: dict | None, gate: dict | None,
@@ -935,6 +952,7 @@ def run_batch() -> None:
     # Warm-up: load only last N lines per file (memory-efficient)
     primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
     setup_recs   = _read_last_n_jsonl(SETUPS_FILE, maxlen=100)
+    liq_setup_recs = _read_last_n_jsonl(LIQ_SETUPS_FILE, maxlen=50)
     s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=300))
     s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=100))
     vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
@@ -950,7 +968,7 @@ def run_batch() -> None:
 
     # Index setups by window_start_ts for lookup
     setups_by_ts: dict[int, list[dict]] = {}
-    for s in setup_recs:
+    for s in setup_recs + liq_setup_recs:
         st = s.get("window_start_ts")
         if st is not None:
             setups_by_ts.setdefault(int(st), []).append(s)
@@ -993,7 +1011,7 @@ def run_batch() -> None:
                                 det, bias, baseline_1s, regime, obs_fh, qual_fh)
             n_primary += 1
 
-    n_setups = len(setup_recs)
+    n_setups = len(setup_recs) + len(liq_setup_recs)
     print(f"[OBS] Batch done: {n_primary} primary bars processed, "
           f"{n_setups} setups from L7, "
           f"{len(tracker.seen_ids)} setups tracked", flush=True)
@@ -1080,14 +1098,24 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
                 pass
 
 
-async def _tail_setups(ctx: LiveCtx, obs_fh) -> None:
-    while not SETUPS_FILE.exists():
+async def _tail_setups(
+    ctx: LiveCtx, obs_fh, setups_file: Path, warmup_maxlen: int = 0,
+) -> None:
+    while not setups_file.exists():
         if HALT_FILE.exists():
             return
         await asyncio.sleep(1.0)
 
-    with open(SETUPS_FILE, "r", encoding="utf-8") as f:
-        # Read existing setups (already processed before live started — skip)
+    with open(setups_file, "r", encoding="utf-8") as f:
+        if warmup_maxlen > 0:
+            loop = asyncio.get_event_loop()
+            warmup = await loop.run_in_executor(
+                None, _read_last_n_jsonl, setups_file, warmup_maxlen,
+            )
+            for setup in warmup:
+                ts = setup.get("window_start_ts")
+                if ts is not None:
+                    ctx.tracker.admit(setup, int(ts), obs_fh)
         f.seek(0, 2)
 
         while True:
@@ -1168,17 +1196,11 @@ async def _primary_task(ctx: LiveCtx) -> None:
 async def run_live() -> None:
     ctx = LiveCtx()
 
-    # We need obs_fh for setup admission; create it early
-    obs_fh_holder: list = []
-
-    async def _setups_with_fh():
-        while not obs_fh_holder:
-            await asyncio.sleep(0.1)
-        await _tail_setups(ctx, obs_fh_holder[0])
-
-    # Patch: open obs file once and share
-    obs_path = OBSERVATIONS_FILE
-    obs_fh_holder_lock = asyncio.Lock()
+    async def _tail_setup_file(setups_file: Path, warmup_maxlen: int) -> None:
+        with open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh:
+            await _tail_setups(
+                ctx, obs_fh, setups_file, warmup_maxlen=warmup_maxlen,
+            )
 
     tasks = [
         asyncio.create_task(_primary_task(ctx),                           name="ob-primary"),
@@ -1197,36 +1219,12 @@ async def run_live() -> None:
             name=f"ob-{det_name}",
         ))
 
-    # Setup tail needs a file handle; run it inline using a separate task
-    # that opens obs file and runs tail
-    async def _tail_setups_live():
-        while not SETUPS_FILE.exists():
-            if HALT_FILE.exists():
-                return
-            await asyncio.sleep(1.0)
-        with open(OBSERVATIONS_FILE, "a", encoding="utf-8") as obs_fh:
-            obs_fh_holder.append(obs_fh)
-            with open(SETUPS_FILE, "r", encoding="utf-8") as f:
-                f.seek(0, 2)
-                while True:
-                    if HALT_FILE.exists():
-                        return
-                    line = f.readline()
-                    if not line:
-                        await asyncio.sleep(POLL_SLEEP)
-                        continue
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        setup = json.loads(line)
-                        st = setup.get("window_start_ts")
-                        if st is not None:
-                            ctx.tracker.admit(setup, int(st), obs_fh)
-                    except Exception:
-                        pass
-
-    tasks.append(asyncio.create_task(_tail_setups_live(), name="ob-setups"))
+    tasks.append(asyncio.create_task(
+        _tail_setup_file(SETUPS_FILE, 0), name="ob-setups",
+    ))
+    tasks.append(asyncio.create_task(
+        _tail_setup_file(LIQ_SETUPS_FILE, 50), name="obs-liq-setups",
+    ))
 
     try:
         await asyncio.gather(*tasks)
