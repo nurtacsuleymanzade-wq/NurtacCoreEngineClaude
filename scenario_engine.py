@@ -993,7 +993,7 @@ async def _tail_bias(ctx: LiveCtx) -> None:
     with open(BIAS_FILE, "r", encoding="utf-8") as f:
         loop = asyncio.get_event_loop()
         import subprocess as _sp3
-        backlog = _sp3.getoutput(f"tail -300 {path}").splitlines()
+        backlog = _sp3.getoutput(f"tail -300 {BIAS_FILE}").splitlines()
         for line in backlog:
             line = line.strip()
             if line:
