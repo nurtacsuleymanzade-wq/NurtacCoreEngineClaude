@@ -955,7 +955,7 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
         # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
         loop = asyncio.get_event_loop()
         import subprocess as _sp3
-        backlog = _sp3.getoutput(f"tail -300 {path}").splitlines()
+        backlog = _sp3.getoutput(f"tail -300 {BASELINE_FILE}").splitlines()
         for line in backlog:
             line = line.strip()
             if not line:
