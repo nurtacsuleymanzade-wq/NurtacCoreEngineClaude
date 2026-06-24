@@ -22,6 +22,7 @@ ENGINES = [
     ("paper_close", "tools/paper_close_engine.py --live"),
     ("validator", "validator.py"),
     ("market_context", "market_context_engine.py"),
+    ("max_pain",      "max_pain_engine.py --mode live"),
     ("detector",       "detector_engine.py --mode live"),
     ("liquidation",    "liquidation_engine.py --mode live"),
     ("decision_gate",  "decision_gate.py --mode live"),
