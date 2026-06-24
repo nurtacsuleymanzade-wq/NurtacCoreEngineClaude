@@ -164,6 +164,7 @@ class ObservedSetup:
         self.direction    = setup.get("direction", "long")
         self.setup_type   = setup.get("setup_type", "normal")
         self.quality_tier = setup.get("quality_tier", "L1_LOW")
+        self.pattern_key  = setup.get("pattern_key", f"{self.setup_type}_{self.direction}")
         self.entry_timing = setup.get("entry_timing", "unknown")
         self.source_setup = setup
         self.opened_ts    = opened_ts
@@ -709,6 +710,7 @@ class ObservedSetup:
             "direction":            self.direction,
             "setup_type":           self.setup_type,
             "quality_tier":         self.quality_tier,
+            "pattern_key":          self.pattern_key,
             "regime_at_qualification": regime.get("trend_regime"),
             "session_at_qualification": regime.get("session"),
             "entry_timing": self.entry_timing,

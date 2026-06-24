@@ -38,6 +38,7 @@ SETUPS_FILE     = DATA_DIR / "setups.jsonl"
 BIAS_CTX_FILE   = DATA_DIR / "bias_context.jsonl"
 VOL_PROFILE_1M  = DATA_DIR / "volume_profile_1m.jsonl"
 EDGE_MATRIX_FILE = DATA_DIR / "edge_matrix.jsonl"
+CALIBRATION_FILE = DATA_DIR / "calibration_profiles.json"
 
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
@@ -185,6 +186,44 @@ def _read_edge_matrix() -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+def _read_calibration_profile() -> dict:
+    if not CALIBRATION_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def _lower_tier(tier: str) -> str:
+    lower = {
+        "L4_PREMIUM": "L3_GOOD_A+",
+        "L3_GOOD_A+": "L2_MEDIUM",
+        "L2_MEDIUM": "L1_LOW",
+        "L1_LOW": "BELOW_MIN",
+    }
+    return lower.get(tier, tier)
+
+def _calibration_adjustment(pattern: str, regime: dict, tier: str) -> tuple[float, bool, float | None]:
+    profile = _read_calibration_profile()
+    pattern_profile = (profile.get("patterns") or {}).get(pattern) or {}
+    if not pattern_profile:
+        return 0.0, False, None
+    candidates = [
+        ((pattern_profile.get("by_regime") or {}).get(regime.get("trend_regime")) or {}).get("wr"),
+        ((pattern_profile.get("by_session") or {}).get(regime.get("session")) or {}).get("wr"),
+        ((pattern_profile.get("by_tier") or {}).get(tier) or {}).get("wr"),
+        pattern_profile.get("total_wr"),
+    ]
+    wr = next((_sf(value, -1.0) for value in candidates if value is not None), -1.0)
+    if wr < 0:
+        return 0.0, False, None
+    if wr >= 0.65:
+        return 1.0, False, wr
+    if wr < 0.50:
+        return 0.0, True, wr
+    return 0.0, False, wr
 
 # Detector direction string -> which side of the market that signal pertains to.
 # Mirrors historical_outcome_engine._SIDE_MAP so edge_matrix keys line up
@@ -921,6 +960,25 @@ def try_generate_setup(
         ob_count  = len((s1s or {}).get("order_blocks") or [])
         fvg_count = len((s1s or {}).get("fvg") or [])
         active_ob_n, active_fvg_n, _ = _check_active_ob_fvg(s1s, direction)
+        if direction == "short" and initiative_dir == "sell_initiative":
+            pattern_key = "initiative_flow_sell"
+        elif direction == "long" and initiative_dir == "buy_initiative":
+            pattern_key = "initiative_flow_buy"
+        else:
+            pattern_key = f"{stype}_{direction}"
+        base_score = ss if direction == "short" else ls
+        base_tier = _get_tier(base_score)
+        score_boost, downgrade, calibration_wr = _calibration_adjustment(
+            pattern_key, regime, base_tier,
+        )
+        calibrated_score = base_score + score_boost
+        calibrated_tier = _get_tier(calibrated_score)
+        if downgrade:
+            calibrated_tier = _lower_tier(calibrated_tier)
+        calibrated_long = calibrated_score if direction == "long" else ls
+        calibrated_short = calibrated_score if direction == "short" else ss
+        setup_breakdown = dict(ev.get("score_breakdown", {}))
+        setup_breakdown["calibration"] = score_boost
 
         return {
             "engine":          "setup_generator",
@@ -941,8 +999,14 @@ def try_generate_setup(
             "tp3": {"price": round(tp3, 4), "rr": 3.0},
             "atr_used": round(atr, 4),
             "trigger_conditions": tc,
-            "direction_score": round(ss if direction == "short" else ls, 4),
-            "quality_tier": _get_tier(ss if direction == "short" else ls),
+            "direction_score": round(calibrated_score, 4),
+            "quality_tier": calibrated_tier,
+            "pattern_key": pattern_key,
+            "calibration": {
+                "observed_wr": calibration_wr,
+                "score_boost": score_boost,
+                "tier_downgraded": downgrade,
+            },
             "regime_context": {
                 "trend_regime": regime.get("trend_regime"),
                 "volatility_class": regime.get("volatility_class"),
@@ -952,11 +1016,11 @@ def try_generate_setup(
             },
             "entry_timing": entry_timing,
             "scores": {
-                "long_score":  round(ls, 4),
-                "short_score": round(ss, 4),
-                "score_gap":   round(ev["score_gap"], 4),
+                "long_score":  round(calibrated_long, 4),
+                "short_score": round(calibrated_short, 4),
+                "score_gap":   round(abs(calibrated_long - calibrated_short), 4),
             },
-            "score_breakdown": ev.get("score_breakdown", {}),
+            "score_breakdown": setup_breakdown,
             "context": {
                 "gate_grade":      gate_grade,
                 "micro_bos":       micro_bos,

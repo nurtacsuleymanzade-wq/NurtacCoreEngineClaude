@@ -370,6 +370,7 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
         "symbol":          SYMBOL,
         "direction":       direction,
         "setup_type":      setup_type,
+        "pattern_key":     setup.get("pattern_key", f"{setup_type}_{direction}"),
         "timeframe_source": timeframe_source,
 
         "open_ts":    open_ts,
@@ -659,6 +660,7 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
         "symbol":            SYMBOL,
         "direction":         direction,
         "setup_type":        trade["setup_type"],
+        "pattern_key":       trade.get("pattern_key"),
         "timeframe_source":  trade["timeframe_source"],
 
         "open_ts":           trade["open_ts"],
