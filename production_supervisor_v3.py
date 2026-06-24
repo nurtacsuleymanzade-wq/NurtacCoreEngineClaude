@@ -15,6 +15,7 @@ ENGINES = [
     ("smart_money", "smart_money_engine.py --mode live"),
     ("aligned_candle", "aligned_candle_engine.py"),
     ("historical_baseline", "historical_baseline_engine.py --mode live"),
+    ("regime", "regime_engine.py --mode live"),
     ("observer", "observer_engine.py --mode live"),
     ("scenario", "scenario_engine.py --mode live"),
     ("paper_trade", "paper_trade_engine.py --mode live"),
