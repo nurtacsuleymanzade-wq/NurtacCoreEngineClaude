@@ -913,7 +913,8 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
         # Warm-up backlog'u thread pool'da oku — büyük dosyalarda event loop'u
         # bloke etmesin (tüm diğer engine task'ları o süre boyunca donar).
         loop = asyncio.get_event_loop()
-        backlog = await loop.run_in_executor(None, f.readlines)
+        import subprocess as _sp2
+        backlog = _sp2.getoutput(f"tail -300 {path}").splitlines()
         for line in backlog:
             line = line.strip()
             if not line:
@@ -1022,7 +1023,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
 
     # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
     loop = asyncio.get_event_loop()
-    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 3600)
+    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 300)
     print(f"[SCEN] Warm-up: {len(existing)} existing primary records", flush=True)
 
     _trim_counter = [0]
