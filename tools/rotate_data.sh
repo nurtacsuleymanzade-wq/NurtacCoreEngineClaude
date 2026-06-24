@@ -40,6 +40,7 @@ files = {
     "regime_context.jsonl": 5000,
     "footprint_live.jsonl": 1000,
     "liquidation_clusters.jsonl": 500,
+    "liquidation_setups.jsonl": 2000,
     "real_liquidations.jsonl": 5000,
     "orderbook_walls.jsonl": 1000,
     "whale_trades.jsonl": 5000,
