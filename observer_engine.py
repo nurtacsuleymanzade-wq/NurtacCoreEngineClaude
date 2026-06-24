@@ -46,6 +46,7 @@ VOL_1M_FILE    = DATA_DIR / "volume_profile_1m.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
 BIAS_FILE      = DATA_DIR / "bias_context.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
+REGIME_FILE    = DATA_DIR / "regime_context.jsonl"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -162,6 +163,7 @@ class ObservedSetup:
         self.setup_id     = setup.get("setup_id", f"{opened_ts}_unknown")
         self.direction    = setup.get("direction", "long")
         self.setup_type   = setup.get("setup_type", "normal")
+        self.entry_timing = setup.get("entry_timing", "unknown")
         self.source_setup = setup
         self.opened_ts    = opened_ts
 
@@ -257,7 +259,7 @@ class ObservedSetup:
         s1s: dict | None, s1m: dict | None, vp1m: dict | None,
         gate: dict | None, scenario: dict | None,
         det: dict[str, dict | None], bias: dict | None,
-        baseline_1s: dict | None,
+        baseline_1s: dict | None, regime: dict | None,
         obs_fh, qual_fh,
     ) -> bool:
         if not self.is_active():
@@ -351,13 +353,25 @@ class ObservedSetup:
         # ── 5. Check qualification ────────────────────────────────────────────
         if self.is_active() and self.state == "QUALIFYING":
             qual = self._build_qual_criteria(delta, micro_bos, trend_1s_dir,
-                                             cur_loc, dom_scen_dir, dom_bias)
+                                             cur_loc, dom_scen_dir, dom_bias,
+                                             regime or {})
+            rejection = None
+            if not qual.get("F0_regime_compatible", True):
+                rejection = "REGIME_MISMATCH"
+            elif not qual.get("F_session_ok", True):
+                rejection = "SESSION_MISMATCH"
+            elif not qual.get("F_timing_ok", True):
+                rejection = "EXTENDED_ENTRY"
+            if rejection:
+                self._transition(ts, "INVALIDATED", rejection,
+                                 rejection, cur_price, obs_fh)
+                return False
             if all(qual.values()):
                 self._emit_qualified(
                     ts, cur_price, poc, vah, val, prof_shape,
                     trend_1s_dir, trend_1m_dir, dom_scen_name,
                     gate_grade, dom_bias, qual,
-                    flow_rec, absrp_rec, qual_fh, obs_fh,
+                    flow_rec, absrp_rec, regime or {}, qual_fh, obs_fh,
                 )
                 return False
 
@@ -594,7 +608,18 @@ class ObservedSetup:
     def _build_qual_criteria(
         self, delta: float, micro_bos: str | None, trend_1s: str,
         cur_loc: str | None, dom_scen_dir: str, dom_bias: str,
+        regime: dict,
     ) -> dict[str, bool]:
+        regime_ok = regime.get("trade_allowed", True) if regime else True
+        compatible = regime.get("compatible_setups", []) if regime else []
+        setup_type_str = f"{self.setup_type}_{self.direction}"
+        f0 = regime_ok and (
+            not compatible or any(c in setup_type_str for c in compatible)
+        )
+        session = regime.get("session", "UNKNOWN") if regime else "UNKNOWN"
+        bad_sessions = {"OFF_HOURS", "ASIA"}
+        f_session = session not in bad_sessions or self.setup_type in ["REVERSAL", "RECLAIM"]
+        f_timing = self.entry_timing not in ("extended",)
         if self.direction == "long":
             f1 = delta > 0
             f2 = (trend_1s == "uptrend" or micro_bos == "bullish")
@@ -609,11 +634,14 @@ class ObservedSetup:
             f5 = dom_bias in ("short", "neutral")
 
         return {
+            "F0_regime_compatible": f0,
             "F1_delta_aligned":     f1,
             "F2_structure_aligned": f2,
             "F3_location_valid":    f3,
             "F4_scenario_aligned":  f4,
             "F5_bias_aligned":      f5,
+            "F_session_ok":         f_session,
+            "F_timing_ok":          f_timing,
         }
 
     # ── Emit qualified setup ──────────────────────────────────────────────────
@@ -622,7 +650,7 @@ class ObservedSetup:
         prof_shape: str | None, trend_1s: str, trend_1m: str,
         dom_scen_name: str | None, gate_grade: str | None, dom_bias: str,
         qual: dict[str, bool], flow_rec: dict, absrp_rec: dict,
-        qual_fh, obs_fh,
+        regime: dict, qual_fh, obs_fh,
     ) -> None:
         time_to_qualify = max(0, (ts - self.opened_ts) // 1000)
         qsid = f"QS_{self.setup_id}"
@@ -679,6 +707,10 @@ class ObservedSetup:
             "symbol":               SYMBOL,
             "direction":            self.direction,
             "setup_type":           self.setup_type,
+            "regime_at_qualification": regime.get("trend_regime"),
+            "session_at_qualification": regime.get("session"),
+            "entry_timing": self.entry_timing,
+            "volatility_at_qualification": regime.get("volatility_class"),
             "qualification_ts":     ts,
             "source_setup_ts":      self.opened_ts,
             "time_to_qualify_seconds": time_to_qualify,
@@ -729,6 +761,20 @@ class ObservedSetup:
             "details": f"all F1-F5 criteria met",
         })
         _write_jsonl(qual_fh, qual_rec)
+        _write_jsonl(obs_fh, {
+            "engine": "observer_engine",
+            "ts": ts,
+            "symbol": SYMBOL,
+            "source_setup_id": self.setup_id,
+            "event_type": "QUALIFIED",
+            "state_before": "QUALIFYING",
+            "state_after": "QUALIFIED",
+            "regime_at_qualification": regime.get("trend_regime"),
+            "session_at_qualification": regime.get("session"),
+            "entry_timing": self.entry_timing,
+            "volatility_at_qualification": regime.get("volatility_class"),
+            "details": "all regime and F1-F5 criteria met",
+        })
         _print_qualified(qual_rec, self.atr_used)
 
 
@@ -756,8 +802,8 @@ def _validate_qualified(rec: dict) -> list[str]:
         errors.append(f"[4] invalid time_to_qualify_seconds: {ttq}")
 
     qual = rec.get("qualification_criteria") or {}
-    if len(qual) != 5 or not all(isinstance(v, bool) for v in qual.values()):
-        errors.append(f"[5] qualification_criteria must have 5 bool values")
+    if len(qual) != 8 or not all(isinstance(v, bool) for v in qual.values()):
+        errors.append(f"[5] qualification_criteria must have 8 bool values")
 
     th = rec.get("transition_history") or []
     for i, entry in enumerate(th):
@@ -850,7 +896,8 @@ class SetupTracker:
     def process_bar(self, ts: int, primary: dict, s1s: dict | None,
                     s1m: dict | None, vp1m: dict | None, gate: dict | None,
                     scenario: dict | None, det: dict, bias: dict | None,
-                    baseline_1s: dict | None, obs_fh, qual_fh) -> None:
+                    baseline_1s: dict | None, regime: dict | None,
+                    obs_fh, qual_fh) -> None:
         """Process one primary bar through all active state machines."""
         # Warn if state machines exceed safe threshold
         if len(self.active) > 8:
@@ -860,7 +907,7 @@ class SetupTracker:
         for sid, sm in list(self.active.items()):
             still_active = sm.process_bar(
                 ts, primary, s1s, s1m, vp1m, gate, scenario,
-                det, bias, baseline_1s, obs_fh, qual_fh,
+                det, bias, baseline_1s, regime, obs_fh, qual_fh,
             )
             if not still_active:
                 done.append(sid)
@@ -881,6 +928,7 @@ def run_batch() -> None:
     gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=100))
     scen_idx     = _build_index(_read_last_n_jsonl(SCENARIOS_FILE, maxlen=100))
     bias_idx     = _build_index(_read_last_n_jsonl(BIAS_FILE, maxlen=100))
+    regime_idx   = _build_index(_read_last_n_jsonl(REGIME_FILE, maxlen=100))
     det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=100))
                     for d, p in DETECTOR_FILES.items()}
 
@@ -925,10 +973,11 @@ def run_batch() -> None:
             gate = gate_idx.get(ts)
             scen = _latest_at_or_before(scen_idx, ts)
             bias = _latest_at_or_before(bias_idx, ts)
+            regime = _latest_at_or_before(regime_idx, ts)
             det  = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
 
             tracker.process_bar(ts, raw, s1s, s1m, vp1m, gate, scen,
-                                det, bias, baseline_1s, obs_fh, qual_fh)
+                                det, bias, baseline_1s, regime, obs_fh, qual_fh)
             n_primary += 1
 
     n_setups = len(setup_recs)
@@ -946,6 +995,7 @@ class LiveCtx:
         self.gate: dict[int, dict] = {}
         self.scen: dict[int, dict] = {}
         self.bias: dict[int, dict] = {}
+        self.regime: dict[int, dict] = {}
         self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
         self.baseline_1s: dict | None = None
         self.tracker = SetupTracker()
@@ -1112,10 +1162,11 @@ async def _primary_task(ctx: LiveCtx) -> None:
             gate = ctx.gate.get(ts)
             scen = _latest_at_or_before(ctx.scen, ts)
             bias = _latest_at_or_before(ctx.bias, ts)
+            regime = _latest_at_or_before(ctx.regime, ts)
             det  = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
 
             ctx.tracker.process_bar(ts, raw, s1s, s1m, vp1m, gate, scen,
-                                    det, bias, ctx.baseline_1s, obs_fh, qual_fh)
+                                    det, bias, ctx.baseline_1s, regime, obs_fh, qual_fh)
 
 
 async def run_live() -> None:
@@ -1141,6 +1192,7 @@ async def run_live() -> None:
         asyncio.create_task(_tail_index(GATE_FILE,     ctx.gate,  "gate"), name="ob-gate"),
         asyncio.create_task(_tail_index(SCENARIOS_FILE, ctx.scen, "scen"), name="ob-scen"),
         asyncio.create_task(_tail_index(BIAS_FILE,     ctx.bias,  "bias"), name="ob-bias"),
+        asyncio.create_task(_tail_index(REGIME_FILE, ctx.regime, "regime"), name="ob-regime"),
         asyncio.create_task(_tail_baseline(ctx),                           name="ob-bl"),
     ]
     for det_name, path in DETECTOR_FILES.items():
