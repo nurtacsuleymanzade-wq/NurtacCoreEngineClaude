@@ -45,6 +45,7 @@ STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
 STRUCT_1M_FILE = DATA_DIR / "structure_1m.jsonl"
 STRUCT_5M_FILE = DATA_DIR / "structure_5m.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
+REGIME_FILE    = DATA_DIR / "regime_context.jsonl"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -709,6 +710,7 @@ def compute_evidence(
         "symbol":          SYMBOL,
         "window_start_ts": ts,
         "window_end_ts":   wte,
+        "close_price":     _sf(((primary.get("candle_dna") or {}).get("close") or {}).get("price"), 0.0),
         "long_score":      round(long_score,  4),
         "short_score":     round(short_score, 4),
         "dominant_side":   dominant,
@@ -791,6 +793,21 @@ def _resolve_atr(baseline: dict | None, s1s: dict | None) -> float:
             return val
     return 1.0
 
+def _calc_entry_timing(ev: dict, s1s: dict, atr: float) -> str:
+    """Return how far price has travelled from the last BOS, in ATR units."""
+    bos_price = (s1s or {}).get("bos", {}).get("last_bos_price")
+    current = ev.get("close_price", 0)
+    if not bos_price or not atr or atr == 0:
+        return "unknown"
+    distance = abs(current - bos_price) / atr
+    if distance < 0.5:
+        return "early"
+    if distance < 1.0:
+        return "mid"
+    if distance < 2.0:
+        return "late"
+    return "extended"
+
 # ── Setup generation ───────────────────────────────────────────────────────────────
 def _check_active_ob_fvg(structure: dict | None, direction: str) -> tuple[int, int, list[dict]]:
     """Return (active_ob_count, active_fvg_count, active_bull_obs)."""
@@ -826,6 +843,7 @@ def try_generate_setup(
     s5m: dict | None,
     det_recs: dict[str, dict | None],
     baseline: dict | None,
+    regime: dict | None,
     primary: dict,
     state: SetupState,
     setups_fh,
@@ -838,6 +856,8 @@ def try_generate_setup(
     ss  = ev["short_score"]
 
     atr = _resolve_atr(baseline, s1s)
+    regime = regime or {}
+    entry_timing = _calc_entry_timing(ev, s1s or {}, atr)
 
     cdna        = primary.get("candle_dna") or {}
     entry_price = _sf((cdna.get("close") or {}).get("price"), 0.0)
@@ -862,6 +882,8 @@ def try_generate_setup(
     initiative_dir = initiative_rec.get("direction")
 
     def _make_setup(direction: str, stype: str, tc: dict) -> dict | None:
+        if not regime.get("trade_allowed", True) or entry_timing == "extended":
+            return None
         sid = f"{ts}_{direction}_{stype}"
         if sid in state.emitted_ids:
             return None
@@ -921,6 +943,14 @@ def try_generate_setup(
             "trigger_conditions": tc,
             "direction_score": round(ss if direction == "short" else ls, 4),
             "quality_tier": _get_tier(ss if direction == "short" else ls),
+            "regime_context": {
+                "trend_regime": regime.get("trend_regime"),
+                "volatility_class": regime.get("volatility_class"),
+                "session": regime.get("session"),
+                "trade_allowed": regime.get("trade_allowed", True),
+                "compatible_setups": regime.get("compatible_setups", []),
+            },
+            "entry_timing": entry_timing,
             "scores": {
                 "long_score":  round(ls, 4),
                 "short_score": round(ss, 4),
@@ -1067,6 +1097,11 @@ def run_batch() -> None:
     s5m_idx      = _build_exact_index(_read_last_n_lines(STRUCT_5M_FILE, 200))
     det_idxs     = {d: _build_exact_index(_read_last_n_lines(p, 200))
                     for d, p in DETECTOR_FILES.items()}
+    regime_idx  = {
+        int(rec.get("ts", 0)): rec
+        for rec in _read_last_n_lines(REGIME_FILE, 200)
+        if rec.get("ts") is not None
+    }
 
     # Baseline: latest record per timeframe
     baseline_1m: dict | None = None
@@ -1100,6 +1135,7 @@ def run_batch() -> None:
             s1m     = _get_latest_at_or_before(s1m_idx, ts)
             s5m     = _get_latest_at_or_before(s5m_idx, ts)
             det_rec = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
+            regime  = _get_latest_at_or_before(regime_idx, ts)
 
             ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, baseline_1m)
 
@@ -1111,7 +1147,7 @@ def run_batch() -> None:
             _write_jsonl(ev_fh, ev)
             n_ev += 1
 
-            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, baseline_1m,
+            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, baseline_1m, regime,
                                raw, state, se_fh)
 
     print(f"[EV] Batch done: {n_ev} evidence records written "
@@ -1127,6 +1163,7 @@ class LiveCtx:
         self.s1m:  dict[int, dict]  = {}
         self.s5m:  dict[int, dict]  = {}
         self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
+        self.regime: dict[int, dict] = {}
         self.baseline_1m: dict | None = None
         self.setup_state = SetupState()
 
@@ -1173,7 +1210,7 @@ async def _tail_secondary_file(
                     if rec.get("timeframe") == "1M" and ctx:
                         ctx.baseline_1m = rec
                 else:
-                    ts = rec.get("window_start_ts")
+                    ts = rec.get("window_start_ts", rec.get("ts"))
                     if ts is not None:
                         cache[int(ts)] = rec
             except (json.JSONDecodeError, Exception):
@@ -1202,7 +1239,7 @@ async def _tail_secondary_file(
                     if rec.get("timeframe") == "1M" and ctx:
                         ctx.baseline_1m = rec
                 else:
-                    ts = rec.get("window_start_ts")
+                    ts = rec.get("window_start_ts", rec.get("ts"))
                     if ts is not None:
                         cache[int(ts)] = rec
             except (json.JSONDecodeError, Exception):
@@ -1286,6 +1323,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             s1m     = _get_latest_at_or_before(ctx.s1m, ts)
             s5m     = _get_latest_at_or_before(ctx.s5m, ts)
             det_rec = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
+            regime  = _get_latest_at_or_before(ctx.regime, ts)
 
             ev = compute_evidence(raw, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m)
 
@@ -1295,7 +1333,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
                 continue
 
             _write_jsonl(ev_fh, ev)
-            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m,
+            try_generate_setup(ev, gate, s1s, s1m, s5m, det_rec, ctx.baseline_1m, regime,
                                raw, ctx.setup_state, se_fh)
     finally:
         pf.close()
@@ -1310,6 +1348,7 @@ async def run_live() -> None:
         asyncio.create_task(_tail_secondary_file(STRUCT_1S_FILE, ctx.s1s, "s1s"), name="ev-s1s"),
         asyncio.create_task(_tail_secondary_file(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="ev-s1m"),
         asyncio.create_task(_tail_secondary_file(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="ev-s5m"),
+        asyncio.create_task(_tail_secondary_file(REGIME_FILE, ctx.regime, "regime"), name="ev-regime"),
         asyncio.create_task(_tail_secondary_file(BASELINE_FILE,  {},      "bl",
                                                  ctx=ctx, is_baseline=True),       name="ev-bl"),
     ]
