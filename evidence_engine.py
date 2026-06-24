@@ -468,8 +468,8 @@ def compute_evidence(
     if sm1s["micro_bos_bearish"]: short_score += 1.0
     if sm1s["trend_uptrend"]:     long_score  += 1.0
     if sm1s["trend_downtrend"]:   short_score += 1.0
-    if sm1s["choch_bullish"]:     long_score  += 2.5
-    if sm1s["choch_bearish"]:     short_score += 2.5
+    if sm1s["choch_bullish"]:     long_score  += 1.0
+    if sm1s["choch_bearish"]:     short_score += 1.0
     if sm1s["msb_bullish"]:       long_score  += 1.0
     if sm1s["msb_bearish"]:       short_score += 1.0
     comps["smart_money_1s"] = sm1s
