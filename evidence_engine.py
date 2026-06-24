@@ -84,6 +84,7 @@ ATR_MULTIPLIER_TP3    = 4.5
 NORMAL_COOLDOWN_MS    = 30_000
 FLASH_COOLDOWN_MS     = 15_000
 MAX_OPEN_SETUPS       = 3
+LIVE_CACHE_MAX        = 300
 
 # ── Helpers ───────────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -240,6 +241,13 @@ def _build_exact_index(records: list[dict]) -> dict[int, dict]:
         if ts is not None:
             idx[int(ts)] = rec
     return idx
+
+def _cache_put(cache: dict[int, dict], ts: int, rec: dict) -> None:
+    cache[ts] = rec
+    overflow = len(cache) - LIVE_CACHE_MAX
+    if overflow > 0:
+        for old_ts in sorted(cache)[:overflow]:
+            cache.pop(old_ts, None)
 
 def _get_latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
     """Return the record with the largest ts <= given ts."""
@@ -1233,8 +1241,9 @@ async def _tail_secondary_file(
         # etmeden thread pool'da oku — büyük dosyalarda (örn. historical_baseline_dna,
         # 90MB+) event loop'u uzun süre dondurmasın.
         loop = asyncio.get_event_loop()
-        import subprocess as _sp
-        _raw = await loop.run_in_executor(None, lambda: _sp.getoutput(f"tail -500 {path}"))
+        _raw = await loop.run_in_executor(
+            None, lambda: subprocess.getoutput(f"tail -{LIVE_CACHE_MAX} {path}"),
+        )
         backlog = [l + "\n" for l in _raw.splitlines()]
         for line in backlog:
             line = line.strip()
@@ -1248,9 +1257,10 @@ async def _tail_secondary_file(
                 else:
                     ts = rec.get("window_start_ts", rec.get("ts"))
                     if ts is not None:
-                        cache[int(ts)] = rec
+                        _cache_put(cache, int(ts), rec)
             except (json.JSONDecodeError, Exception):
                 pass
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1277,7 +1287,7 @@ async def _tail_secondary_file(
                 else:
                     ts = rec.get("window_start_ts", rec.get("ts"))
                     if ts is not None:
-                        cache[int(ts)] = rec
+                        _cache_put(cache, int(ts), rec)
             except (json.JSONDecodeError, Exception):
                 pass
     finally:
