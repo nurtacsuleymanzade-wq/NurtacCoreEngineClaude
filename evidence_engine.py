@@ -194,24 +194,74 @@ def _lower_tier(tier: str) -> str:
     }
     return lower.get(tier, tier)
 
+def _wilson_lower(wins: int, n: int) -> float:
+    """Wilson score interval lower bound — %90 güven aralığı."""
+    import math
+    if n == 0:
+        return 0.0
+    z = 1.645
+    p = wins / n
+    d = 1 + z**2 / n
+    c = (p + z**2 / (2 * n)) / d
+    m = (z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))) / d
+    return max(0.0, c - m)
+
+_CAL_MIN_SAMPLE_BOOST   = 20   # boost için minimum trade sayısı
+_CAL_MIN_SAMPLE_PENALTY = 15   # tier düşürme için minimum
+
 def _calibration_adjustment(pattern: str, regime: dict, tier: str) -> tuple[float, bool, float | None]:
     profile = _read_calibration_profile()
     pattern_profile = (profile.get("patterns") or {}).get(pattern) or {}
     if not pattern_profile:
         return 0.0, False, None
-    candidates = [
-        ((pattern_profile.get("by_regime") or {}).get(regime.get("trend_regime")) or {}).get("wr"),
-        ((pattern_profile.get("by_session") or {}).get(regime.get("session")) or {}).get("wr"),
-        ((pattern_profile.get("by_tier") or {}).get(tier) or {}).get("wr"),
-        pattern_profile.get("total_wr"),
-    ]
-    wr = next((_sf(value, -1.0) for value in candidates if value is not None), -1.0)
-    if wr < 0:
+
+    # count + wr birlikte al (by_regime/session/tier dict içinde count alanı var)
+    def _pick(sub: dict | None) -> tuple[float, int]:
+        if not sub:
+            return -1.0, 0
+        wr  = _sf(sub.get("wr"), -1.0)
+        cnt = int(sub.get("count") or 0)
+        return wr, cnt
+
+    regime_name  = regime.get("trend_regime")
+    session_name = regime.get("session")
+
+    wr_regime,  n_regime  = _pick((pattern_profile.get("by_regime")  or {}).get(regime_name))
+    wr_session, n_session = _pick((pattern_profile.get("by_session") or {}).get(session_name))
+    wr_tier,    n_tier    = _pick((pattern_profile.get("by_tier")    or {}).get(tier))
+    wr_total = _sf(pattern_profile.get("total_wr"), -1.0)
+    n_total  = int(pattern_profile.get("count") or 0)
+
+    # En spesifik ve yeterli örneklemli kaynağı seç
+    wr, n = -1.0, 0
+    for candidate_wr, candidate_n in [
+        (wr_regime, n_regime),
+        (wr_session, n_session),
+        (wr_tier, n_tier),
+        (wr_total, n_total),
+    ]:
+        if candidate_wr >= 0 and candidate_n > n:
+            wr, n = candidate_wr, candidate_n
+
+    if wr < 0 or n == 0:
         return 0.0, False, None
-    if wr >= 0.65:
+
+    # GUARD: Yetersiz örneklem — hiçbir şey yapma
+    if n < _CAL_MIN_SAMPLE_BOOST:
+        return 0.0, False, wr
+
+    # Wilson lower bound ile gerçek edge kontrolü
+    wins = round(wr * n)
+    wl   = _wilson_lower(wins, n)
+
+    # Boost: Wilson lower >= 0.60 ise gerçek edge kanıtlandı
+    if wl >= 0.60 and n >= _CAL_MIN_SAMPLE_BOOST:
         return 1.0, False, wr
-    if wr < 0.50:
+
+    # Penalize: Wilson lower <= 0.40 ve yeterli örneklem
+    if wl <= 0.40 and n >= _CAL_MIN_SAMPLE_PENALTY:
         return 0.0, True, wr
+
     return 0.0, False, wr
 
 # Detector direction string -> which side of the market that signal pertains to.
