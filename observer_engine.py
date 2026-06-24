@@ -919,6 +919,12 @@ class SetupTracker:
         sid = setup.get("setup_id", "")
         if not sid or sid in self.seen_ids:
             return
+        # quality_block olan setup'ları observer'a alma
+        qb = (setup.get("score_breakdown") or {}).get("quality_block")
+        if qb:
+            self.seen_ids.add(sid)  # tekrar denemesin
+            print(f"[OBS] SKIP quality_block setup {sid}: {qb}", flush=True)
+            return
         self.seen_ids.add(sid)
 
         # Enforce max concurrent setups
