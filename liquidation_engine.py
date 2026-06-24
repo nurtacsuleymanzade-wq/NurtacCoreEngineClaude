@@ -501,6 +501,25 @@ class WhaleOrderTracker:
                 5.0, min(200.0, average * self.WHALE_MULTIPLIER),
             )
 
+    @staticmethod
+    def _reliability_tier(duration_hours: float) -> str:
+        if duration_hours >= 24 * 7:
+            return "INSTITUTIONAL"
+        if duration_hours >= 24:
+            return "SIGNIFICANT"
+        if duration_hours >= 1:
+            return "SHORT_TERM"
+        return "NEW"
+
+    def update_active_order_durations(self, ts_now: int | None = None) -> None:
+        """Refresh duration metadata for all currently visible whale orders."""
+        now = ts_now if ts_now is not None else int(time.time() * 1000)
+        for order in self.active_whale_orders.values():
+            first_seen_ts = int(order.get("first_seen_ts", now))
+            duration_hours = max(0.0, (now - first_seen_ts) / 3_600_000)
+            order["duration_hours"] = round(duration_hours, 2)
+            order["reliability_tier"] = self._reliability_tier(duration_hours)
+
     def _process_side(
         self, side: str, previous: dict[float, float], current: dict[float, float],
         last_trade_price: float, ts: int,
@@ -517,6 +536,8 @@ class WhaleOrderTracker:
                     "usd_value": round(qty * price, 0),
                     "first_seen_ts": ts,
                     "status": "ACTIVE",
+                    "reliability_tier": "NEW",
+                    "duration_hours": 0.0,
                 }
                 self.active_whale_orders[key] = order
                 _append_jsonl(WHALE_ORDER_FILE, {
@@ -533,12 +554,23 @@ class WhaleOrderTracker:
                     if last_trade_price > 0 and price > 0 else 999.0
                 )
                 event = "FILLED" if distance < 0.05 else "CANCELLED"
+                first_seen_ts = int(order.get("first_seen_ts", ts))
+                duration_ms = max(0, ts - first_seen_ts)
+                duration_hours = duration_ms / 3_600_000
                 _append_jsonl(WHALE_ORDER_FILE, {
                     **order, "engine": "liquidation_engine", "type": "whale_order",
                     "ts": ts, "event": event,
-                    "duration_seconds": round((ts - int(order.get("first_seen_ts", ts))) / 1000),
+                    "duration_ms": duration_ms,
+                    "duration_seconds": round(duration_ms / 1000),
+                    "duration_hours": round(duration_hours, 2),
+                    "reliability_tier": self._reliability_tier(duration_hours),
                     "price_distance_pct": round(distance, 4),
                     "spoofing_suspected": event == "CANCELLED",
+                    "spoofing_confidence": (
+                        "HIGH" if event == "CANCELLED" and duration_hours < 1 else
+                        "MEDIUM" if event == "CANCELLED" and duration_hours < 24 else
+                        "LOW" if event == "CANCELLED" else "NONE"
+                    ),
                 })
                 if event == "CANCELLED":
                     print(
@@ -566,7 +598,7 @@ class WhaleOrderTracker:
 
 def flush_orderbook_stats(
     bids: dict[float, float], asks: dict[float, float], current_price: float,
-    whale_threshold: float,
+    whale_threshold: float, whale_orders: WhaleOrderTracker,
 ) -> dict:
     price_range = current_price * 0.02
     near_bids = [(price, qty) for price, qty in bids.items()
@@ -585,6 +617,21 @@ def flush_orderbook_stats(
     bid_pct = near_bid_vol / total_volume * 100 if total_volume > 0 else 50.0
     top_bids = sorted(bids.items(), key=lambda item: item[1], reverse=True)[:5]
     top_asks = sorted(asks.items(), key=lambda item: item[1], reverse=True)[:5]
+    whale_orders.update_active_order_durations()
+    active_whale_summary: dict[str, list[dict]] = {
+        "INSTITUTIONAL": [], "SIGNIFICANT": [], "SHORT_TERM": [], "NEW": [],
+    }
+    for order in whale_orders.active_whale_orders.values():
+        tier = str(order.get("reliability_tier", "NEW"))
+        if tier not in active_whale_summary:
+            tier = "NEW"
+        active_whale_summary.get(tier, []).append({
+            "side": order.get("side"),
+            "price": order.get("price"),
+            "qty_btc": order.get("qty_btc"),
+            "usd_value": order.get("usd_value"),
+            "duration_hours": order.get("duration_hours", 0.0),
+        })
     record = {
         "engine": "liquidation_engine", "type": "orderbook_stats",
         "ts": int(time.time() * 1000), "current_price": current_price,
@@ -601,6 +648,11 @@ def flush_orderbook_stats(
         "top_bid_levels": [{"price": p, "qty": round(q, 2)} for p, q in top_bids],
         "top_ask_levels": [{"price": p, "qty": round(q, 2)} for p, q in top_asks],
         "wall_threshold_btc": round(whale_threshold, 2),
+        "active_whale_orders": active_whale_summary,
+        "institutional_wall_prices": [
+            order.get("price")
+            for order in active_whale_summary.get("INSTITUTIONAL", [])
+        ],
     }
     _append_jsonl(OB_STATS_FILE, record)
     return record
@@ -904,7 +956,7 @@ async def _periodic_outputs(
         if now >= next_ob_stats and current_price > 0:
             flush_orderbook_stats(
                 walls.bids, walls.asks, current_price,
-                whale_orders.whale_order_threshold,
+                whale_orders.whale_order_threshold, whale_orders,
             )
             next_ob_stats = now + OB_STATS_INTERVAL_S
         if now >= next_calibration:

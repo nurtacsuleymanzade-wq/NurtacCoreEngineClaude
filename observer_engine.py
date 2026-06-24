@@ -323,6 +323,16 @@ class ObservedSetup:
 
         dom_scen_dir  = (scenario or {}).get("dominant_direction", "neutral")
         dom_scen_name = (scenario or {}).get("dominant_scenario")
+        cascade_scenario = next((
+            item for item in (scenario or {}).get("active_scenarios", [])
+            if item.get("scenario_name", item.get("name"))
+            == "LIQ_CASCADE_REVERSAL"
+        ), None)
+        cascade_direction = (
+            cascade_scenario.get("direction") if cascade_scenario else None
+        )
+        if cascade_scenario and self.state == "WAITING":
+            self.waiting_timeout_ms = 30_000
         scen_is_confirmed = any(
             s.get("status") == "confirmed" and s.get("scenario_name") == dom_scen_name
             for s in (scenario or {}).get("active_scenarios", [])
@@ -371,7 +381,7 @@ class ObservedSetup:
         if self.is_active() and self.state == "QUALIFYING":
             qual = self._build_qual_criteria(delta, micro_bos, trend_1s_dir,
                                              cur_loc, dom_scen_dir, dom_bias,
-                                             regime or {})
+                                             regime or {}, cascade_direction)
             rejection = None
             if not qual.get("F0_regime_compatible", True):
                 rejection = "REGIME_MISMATCH"
@@ -625,7 +635,7 @@ class ObservedSetup:
     def _build_qual_criteria(
         self, delta: float, micro_bos: str | None, trend_1s: str,
         cur_loc: str | None, dom_scen_dir: str, dom_bias: str,
-        regime: dict,
+        regime: dict, cascade_direction: str | None = None,
     ) -> dict[str, bool]:
         regime_ok = regime.get("trade_allowed", True) if regime else True
         compatible = regime.get("compatible_setups", []) if regime else []
@@ -652,8 +662,12 @@ class ObservedSetup:
 
         if self.setup_type.startswith("liq_"):
             f3 = True
-        if self.setup_type == "liq_cascade_reversal":
-            f4 = True
+        if cascade_direction is not None:
+            f4 = (
+                cascade_direction == "bullish"
+                if self.direction == "long"
+                else cascade_direction == "bearish"
+            )
 
         return {
             "F0_regime_compatible": f0,

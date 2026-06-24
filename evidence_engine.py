@@ -800,6 +800,45 @@ def compute_evidence(
     elif bid_pct <= 35:
         short_score += 1.0
         score_breakdown["ob_imbalance_short"] = 1.0
+
+    active_whale_orders = orderbook_stats.get("active_whale_orders") or {}
+    institutional_walls = active_whale_orders.get("INSTITUTIONAL") or []
+    institutional_ask_walls = [
+        wall for wall in institutional_walls
+        if wall.get("side") == "ask"
+        and _sf(wall.get("price")) > current_price
+    ]
+    institutional_bid_walls = [
+        wall for wall in institutional_walls
+        if wall.get("side") == "bid"
+        and 0 < _sf(wall.get("price")) < current_price
+    ]
+    if current_price > 0 and institutional_ask_walls:
+        nearest_ask_wall = min(
+            institutional_ask_walls, key=lambda wall: _sf(wall.get("price")),
+        )
+        ask_distance_pct = (
+            (_sf(nearest_ask_wall.get("price")) - current_price)
+            / current_price * 100
+        )
+        if ask_distance_pct < 1.0:
+            long_score -= 2.0
+            score_breakdown["institutional_wall_blocking_long"] = -2.0
+        short_score += 1.5
+        score_breakdown["institutional_support_short"] = 1.5
+    if current_price > 0 and institutional_bid_walls:
+        nearest_bid_wall = max(
+            institutional_bid_walls, key=lambda wall: _sf(wall.get("price")),
+        )
+        bid_distance_pct = (
+            (current_price - _sf(nearest_bid_wall.get("price")))
+            / current_price * 100
+        )
+        if bid_distance_pct < 1.0:
+            short_score -= 2.0
+            score_breakdown["institutional_wall_blocking_short"] = -2.0
+        long_score += 1.5
+        score_breakdown["institutional_support_long"] = 1.5
     comps["liquidation_context"] = {
         "available": bool(liquidation),
         "cascade_risk": liquidation.get("cascade_risk"),
@@ -814,6 +853,9 @@ def compute_evidence(
         "whale_pressure_strength": whale_strength,
         "ob_pressure": orderbook_stats.get("ob_pressure"),
         "bid_pct": bid_pct,
+        "institutional_wall_count": len(institutional_walls),
+        "institutional_ask_wall_count": len(institutional_ask_walls),
+        "institutional_bid_wall_count": len(institutional_bid_walls),
         "nearest_liq_long": nearby_long[0].get("price") if nearby_long else None,
         "nearest_liq_short": nearby_short[0].get("price") if nearby_short else None,
     }

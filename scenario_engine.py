@@ -46,6 +46,8 @@ VOL_SES_FILE   = DATA_DIR / "volume_profile_session.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
 BIAS_FILE      = DATA_DIR / "bias_context.jsonl"
+LIQ_FILE       = DATA_DIR / "liquidation_clusters.jsonl"
+REAL_LIQ_FILE  = DATA_DIR / "real_liquidations.jsonl"
 
 DETECTOR_FILES = {
     "absorption":      DATA_DIR / "labels_absorption.jsonl",
@@ -611,6 +613,95 @@ def _s9_balance_breakout_anticipation(s1m: dict | None, gate: dict | None,
         },
     }
 
+def _s10_liq_cascade_reversal(
+    ts: int,
+    current_price: float,
+    liq_clusters: dict | None,
+    real_liqs_window: list[dict],
+    rolling: dict | None,
+) -> dict:
+    """Detect momentum exhaustion after a >=$500K liquidation cascade."""
+    nearby_long = (liq_clusters or {}).get("nearby_long_clusters") or []
+    nearby_short = (liq_clusters or {}).get("nearby_short_clusters") or []
+    long_cluster_nearby = current_price > 0 and any(
+        _sf(cluster.get("usd_at_risk")) > 20
+        and abs(_sf(cluster.get("price")) - current_price) / current_price < 0.005
+        for cluster in nearby_long
+    )
+    short_cluster_nearby = current_price > 0 and any(
+        _sf(cluster.get("usd_at_risk")) > 20
+        and abs(_sf(cluster.get("price")) - current_price) / current_price < 0.005
+        for cluster in nearby_short
+    )
+
+    recent_cutoff = ts - 60_000
+    recent_liqs = [
+        record for record in real_liqs_window
+        if recent_cutoff <= int(record.get("ts", 0)) <= ts
+    ]
+    long_liq_usd = sum(
+        _sf(record.get("usd_value")) for record in recent_liqs
+        if record.get("liq_type") == "long_liquidated"
+    )
+    short_liq_usd = sum(
+        _sf(record.get("usd_value")) for record in recent_liqs
+        if record.get("liq_type") == "short_liquidated"
+    )
+    minimum_liq_usd = 500_000
+    long_cascade = long_cluster_nearby and long_liq_usd >= minimum_liq_usd
+    short_cascade = short_cluster_nearby and short_liq_usd >= minimum_liq_usd
+    delta = _sf((rolling or {}).get("delta"), 0.0)
+
+    direction: str | None = None
+    reason = ""
+    if long_cascade and delta > -0.5:
+        direction = "bullish"
+        reason = (
+            f"Long cascade: ${long_liq_usd / 1000:.0f}K liquidated near cluster. "
+            "Momentum reversing."
+        )
+    elif short_cascade and delta < 0.5:
+        direction = "bearish"
+        reason = (
+            f"Short cascade: ${short_liq_usd / 1000:.0f}K liquidated near cluster. "
+            "Momentum reversing."
+        )
+
+    cluster_nearby = long_cluster_nearby or short_cluster_nearby
+    cascade_detected = long_cascade or short_cascade
+    momentum_reversing = direction is not None
+    active = cluster_nearby and cascade_detected and momentum_reversing
+    return {
+        "scenario_id": "S10",
+        "scenario_name": "LIQ_CASCADE_REVERSAL",
+        "name": "LIQ_CASCADE_REVERSAL",
+        "status": "confirmed" if active else "none",
+        "score": 6 if active else 0,
+        "max_score": 7,
+        "direction": direction if active else None,
+        "reason": reason,
+        "type": "reversal",
+        "urgency": "HIGH",
+        "conditions_met": {
+            "C1": cluster_nearby,
+            "C2": cascade_detected,
+            "C3": momentum_reversing,
+            "C4": direction in ("bullish", "bearish"),
+            "C5": bool(recent_liqs),
+        },
+        "market_questions": {
+            "location": "within 0.5% of a major liquidation cluster",
+            "aggression": "forced liquidation flow",
+            "absorption": None,
+            "exhaustion": "cascade momentum is slowing",
+            "trap": "late cascade participants",
+            "acceptance": None,
+            "continuation": reason or "waiting for cascade momentum reversal",
+            "invalidation": "liquidation flow accelerates in the cascade direction",
+            "target": "reversion away from the liquidation cluster",
+        },
+    }
+
 # ── Validation ────────────────────────────────────────────────────────────────
 def _validate_output(rec: dict) -> list[str]:
     errors: list[str] = []
@@ -652,6 +743,8 @@ def evaluate_scenarios(
     baseline: dict | None,
     prev_location: str | None,
     trade_count_seq: list[int],
+    liq_clusters: dict | None = None,
+    real_liqs_window: list[dict] | None = None,
 ) -> dict:
     ts  = int(primary.get("window_start_ts", 0))
     wte = int(primary.get("window_end_ts", ts + 1000))
@@ -676,6 +769,9 @@ def evaluate_scenarios(
         _s7_reclaim(primary, s1s, det, vp1m, prev_location),
         _s8_liquidity_sweep(primary, s1m, det),
         _s9_balance_breakout_anticipation(s1m, gate, bias, vp1m, det),
+        _s10_liq_cascade_reversal(
+            ts, cur_price, liq_clusters, real_liqs_window or [], cdna,
+        ),
     ]
 
     active = [r for r in all_results if r["status"] != "none"]
@@ -823,6 +919,8 @@ def run_batch() -> None:
     vp_ses_idx   = _build_index(_read_last_n_jsonl(VOL_SES_FILE, maxlen=100))
     gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=100))
     det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=100)) for d, p in DETECTOR_FILES.items()}
+    liq_idx      = _build_index(_read_last_n_jsonl(LIQ_FILE, maxlen=100))
+    real_liqs_window = _read_last_n_jsonl(REAL_LIQ_FILE, maxlen=200)
 
     bl_recs    = _read_last_n_jsonl(BASELINE_FILE, maxlen=100)
     baseline_1s = _load_baseline_1s(bl_recs)
@@ -858,6 +956,7 @@ def run_batch() -> None:
             vp_s = _latest_at_or_before(vp_ses_idx, ts)
             gate = gate_idx.get(ts)
             det  = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
+            liq_rec = _latest_at_or_before(liq_idx, ts)
 
             tc = int(cdna.get("trade_count") or 0)
             trade_count_buf.append(tc)
@@ -867,6 +966,7 @@ def run_batch() -> None:
             result = evaluate_scenarios(
                 raw, s1s, s1m, s5m, vp1m, vp_s, gate, det,
                 bias_rec, baseline_1s, prev_location, trade_count_buf,
+                liq_rec, real_liqs_window,
             )
 
             errs = _validate_output(result)
@@ -904,6 +1004,8 @@ class LiveCtx:
         self.vp1m: dict[int, dict] = {}
         self.vp_s: dict[int, dict] = {}
         self.gate: dict[int, dict] = {}
+        self.liq:  dict[int, dict] = {}
+        self.real_liqs: deque[dict] = deque(maxlen=200)
         self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
         self.baseline_1s: dict | None = None
         self.bias:        dict | None = None
@@ -929,7 +1031,7 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                 continue
             try:
                 rec = json.loads(line)
-                ts = rec.get("window_start_ts")
+                ts = rec.get("window_start_ts", rec.get("ts"))
                 if ts is not None:
                     _put_live_cache(cache, int(ts), rec)
             except Exception:
@@ -947,11 +1049,41 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                 continue
             try:
                 rec = json.loads(line)
-                ts = rec.get("window_start_ts")
+                ts = rec.get("window_start_ts", rec.get("ts"))
                 if ts is not None:
                     _put_live_cache(cache, int(ts), rec)
             except Exception:
                 pass
+
+async def _tail_event_window(
+    path: Path, window: deque[dict], label: str,
+) -> None:
+    """Tail an event JSONL into a bounded in-memory window."""
+    while not path.exists():
+        if HALT_FILE.exists():
+            return
+        await asyncio.sleep(1.0)
+
+    with open(path, "r", encoding="utf-8") as event_file:
+        import subprocess as _sp4
+        backlog = _sp4.getoutput(f"tail -200 {path}").splitlines()
+        for line in backlog:
+            try:
+                window.append(json.loads(line))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        event_file.seek(0, 2)
+        while True:
+            if HALT_FILE.exists():
+                return
+            line = event_file.readline()
+            if not line:
+                await asyncio.sleep(POLL_SLEEP)
+                continue
+            try:
+                window.append(json.loads(line))
+            except (json.JSONDecodeError, TypeError):
+                print(f"[SCEN] {label}: invalid JSONL event skipped", flush=True)
 
 async def _tail_baseline(ctx: LiveCtx) -> None:
     while not BASELINE_FILE.exists():
@@ -1078,6 +1210,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             vp_s = _latest_at_or_before(ctx.vp_s, ts)
             gate = ctx.gate.get(ts)
             det  = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
+            liq_rec = _latest_at_or_before(ctx.liq, ts)
 
             tc = int(cdna.get("trade_count") or 0)
             ctx.trade_count_buf.append(tc)
@@ -1087,6 +1220,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
             result = evaluate_scenarios(
                 raw, s1s, s1m, s5m, vp1m, vp_s, gate, det,
                 ctx.bias, ctx.baseline_1s, ctx.prev_location, ctx.trade_count_buf,
+                liq_rec, list(ctx.real_liqs),
             )
 
             errs = _validate_output(result)
@@ -1128,6 +1262,11 @@ async def run_live() -> None:
         asyncio.create_task(_tail_index(VOL_1M_FILE,   ctx.vp1m, "vp1m"), name="sc-vp1m"),
         asyncio.create_task(_tail_index(VOL_SES_FILE,  ctx.vp_s, "vpses"), name="sc-vpses"),
         asyncio.create_task(_tail_index(GATE_FILE,     ctx.gate, "gate"), name="sc-gate"),
+        asyncio.create_task(_tail_index(LIQ_FILE,      ctx.liq, "liquidation"), name="sc-liq"),
+        asyncio.create_task(
+            _tail_event_window(REAL_LIQ_FILE, ctx.real_liqs, "real-liquidations"),
+            name="sc-real-liqs",
+        ),
         asyncio.create_task(_tail_baseline(ctx),                          name="sc-bl"),
         asyncio.create_task(_tail_bias(ctx),                              name="sc-bias"),
     ]
