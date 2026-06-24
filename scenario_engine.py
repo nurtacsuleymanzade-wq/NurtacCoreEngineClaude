@@ -31,7 +31,7 @@ DATA_DIR  = Path("data")
 HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 FULL_PRINT = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_SLEEP = 0.05
-LIVE_CACHE_MAX = 600
+LIVE_CACHE_MAX = 120
 
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 MEMORY_FILE    = DATA_DIR / "scenario_memory.jsonl"
@@ -72,11 +72,8 @@ def _read_last_line(path: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        last = ""
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last = line.strip()
+        import subprocess as _sp
+        last = _sp.getoutput(f"tail -1 {path}").strip()
         if not last:
             return None
         return json.loads(last)
@@ -1024,7 +1021,7 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
         # bloke etmesin (tüm diğer engine task'ları o süre boyunca donar).
         loop = asyncio.get_event_loop()
         import subprocess as _sp2
-        backlog = _sp2.getoutput(f"tail -300 {path}").splitlines()
+        backlog = _sp2.getoutput(f"tail -{LIVE_CACHE_MAX} {path}").splitlines()
         for line in backlog:
             line = line.strip()
             if not line:
@@ -1036,6 +1033,8 @@ async def _tail_index(path: Path, cache: dict[int, dict], label: str) -> None:
                     _put_live_cache(cache, int(ts), rec)
             except Exception:
                 pass
+
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1095,7 +1094,7 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
         # historical_baseline_dna.jsonl 90MB+ olabiliyor — thread pool'da oku.
         loop = asyncio.get_event_loop()
         import subprocess as _sp3
-        backlog = _sp3.getoutput(f"tail -300 {BASELINE_FILE}").splitlines()
+        backlog = _sp3.getoutput(f"tail -120 {BASELINE_FILE}").splitlines()
         for line in backlog:
             line = line.strip()
             if not line:
@@ -1106,6 +1105,8 @@ async def _tail_baseline(ctx: LiveCtx) -> None:
                     ctx.baseline_1s = rec
             except Exception:
                 pass
+
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1133,7 +1134,7 @@ async def _tail_bias(ctx: LiveCtx) -> None:
     with open(BIAS_FILE, "r", encoding="utf-8") as f:
         loop = asyncio.get_event_loop()
         import subprocess as _sp3
-        backlog = _sp3.getoutput(f"tail -300 {BIAS_FILE}").splitlines()
+        backlog = _sp3.getoutput(f"tail -120 {BIAS_FILE}").splitlines()
         for line in backlog:
             line = line.strip()
             if line:
@@ -1141,6 +1142,8 @@ async def _tail_bias(ctx: LiveCtx) -> None:
                     ctx.bias = json.loads(line)
                 except Exception:
                     pass
+
+        f.seek(0, 2)
 
         while True:
             if HALT_FILE.exists():
@@ -1165,7 +1168,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
 
     # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
     loop = asyncio.get_event_loop()
-    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 300)
+    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 120)
     print(f"[SCEN] Warm-up: {len(existing)} existing primary records", flush=True)
 
     _trim_counter = [0]

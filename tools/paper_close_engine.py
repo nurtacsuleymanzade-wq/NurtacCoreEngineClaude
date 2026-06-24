@@ -76,7 +76,7 @@ def extract_hlc(row):
     return high, low, close, "verified_high_low"
 
 def load_price_rows():
-    candidates = []
+    source_report = []
 
     for pf in PRICE_FILES:
         rows = read_jsonl_tail(pf, 500)
@@ -96,25 +96,19 @@ def load_price_rows():
 
             usable.append((ts, high, low, close, quality, str(pf), r))
 
+        source_report.append({
+            "file": str(pf),
+            "usable_rows": len(usable),
+            "missing_high_low_rows": missing_hl,
+        })
+
+        # PRICE_FILES is ordered from highest to lowest resolution. Returning
+        # immediately avoids retaining and parsing five large DNA tails at once.
         if usable:
             usable.sort(key=lambda x: x[0])
-            candidates.append({
-                "file": str(pf),
-                "usable_rows": len(usable),
-                "missing_high_low_rows": missing_hl,
-                "rows": usable,
-            })
+            return str(pf), usable, source_report
 
-    if not candidates:
-        return None, [], []
-
-    # En yüksek çözünürlük sırası PRICE_FILES sırasıdır; ilk usable kaynak seçilir.
-    chosen = candidates[0]
-    source_report = [
-        {k: v for k, v in c.items() if k != "rows"}
-        for c in candidates
-    ]
-    return chosen["file"], chosen["rows"], source_report
+    return None, [], source_report
 
 def sid_of(row):
     return row.get("source_setup_id") or row.get("setup_id") or row.get("qualified_setup_id")

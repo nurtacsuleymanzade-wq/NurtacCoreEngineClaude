@@ -12,8 +12,9 @@ OUT_PROFILE = DATA / "calibration_profiles.json"
 OUT_JSONL = DATA / "calibration_feed.jsonl"
 OUT_REPORT = DATA / "calibration_feed_report.json"
 OUT_DECISION_GATE_VIEW = DATA / "decision_gate_calibration_view.json"
+TAIL_LIMIT = 5000
 
-def read_jsonl_tail(path, n=200000):
+def read_jsonl_tail(path, n=TAIL_LIMIT):
     if not path.exists():
         return []
     rows = []
@@ -206,7 +207,7 @@ def rank_best_worst(stats):
     }
 
 def main():
-    rows = read_jsonl_tail(HIST, 200000)
+    rows = read_jsonl_tail(HIST, TAIL_LIMIT)
 
     c = Counter(outcome_class(r) for r in rows)
     pnl = [fnum(r.get("pnl_r")) for r in rows if fnum(r.get("pnl_r")) is not None]

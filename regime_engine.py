@@ -38,6 +38,8 @@ SESSION_SETUP_COMPAT = {
     "OFF_HOURS": [],
 }
 
+_CANDLE_CACHE: dict[Path, tuple[int, int, list[dict]]] = {}
+
 
 def _tail_records(path: Path, count: int = 50) -> list[dict]:
     """Read only a bounded tail and tolerate malformed or concatenated JSON."""
@@ -75,9 +77,17 @@ def _price(record: dict, field: str) -> float:
 
 
 def _compact_candles(path: Path) -> list[dict]:
+    try:
+        stat = path.stat()
+        cached = _CANDLE_CACHE.get(path)
+        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            return cached[2]
+    except OSError:
+        return []
+
     candles: list[dict] = []
     seen: set[int] = set()
-    for record in _tail_records(path, 50):
+    for record in _tail_records(path, 20):
         ts = int(record.get("window_start_ts", 0) or 0)
         candle = {
             "ts": ts,
@@ -88,7 +98,9 @@ def _compact_candles(path: Path) -> list[dict]:
         if ts and ts not in seen and all(candle.get(k, 0) > 0 for k in ("high", "low", "close")):
             candles.append(candle)
             seen.add(ts)
-    return sorted(candles, key=lambda item: item.get("ts", 0))[-50:]
+    result = sorted(candles, key=lambda item: item.get("ts", 0))[-20:]
+    _CANDLE_CACHE[path] = (stat.st_mtime_ns, stat.st_size, result)
+    return result
 
 
 def _direction(candles: list[dict]) -> str:

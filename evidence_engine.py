@@ -91,7 +91,7 @@ ATR_MULTIPLIER_TP3    = 4.5
 NORMAL_COOLDOWN_MS    = 30_000
 FLASH_COOLDOWN_MS     = 15_000
 MAX_OPEN_SETUPS       = 3
-LIVE_CACHE_MAX        = 300
+LIVE_CACHE_MAX        = 120
 
 # ── Helpers ───────────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -1690,7 +1690,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
     # _read_last_n_jsonl tüm dosyayı satır satır tarar — thread pool'da çalıştır
     # ki event loop'u bloke etmesin.
     loop = asyncio.get_event_loop()
-    primary_existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 300)
+    primary_existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 120)
     print(f"[EV] Warm-up: {len(primary_existing)} existing primary records", flush=True)
 
     ev_fh = open(EVIDENCE_FILE, "a", encoding="utf-8")

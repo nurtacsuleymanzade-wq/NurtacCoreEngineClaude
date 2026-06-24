@@ -156,10 +156,12 @@ def fetch_multi_exchange_delta(binance_spot: float) -> dict:
 
 
 def fetch_etf_data(btc_spot: float) -> dict:
+    # Approximate BTC entitlement per ETF share (2026 Q2). These values drift
+    # slowly with fees and share creation/redemption and must be reviewed.
     btc_per_share = {
-        "IBIT": 0.0001786,
-        "FBTC": 0.0000924,
-        "GBTC": 0.00077582,
+        "IBIT": 0.000571,
+        "FBTC": 0.000877,
+        "GBTC": 0.000781,
     }
     results: dict[str, dict] = {}
     total_volume_usd = 0.0

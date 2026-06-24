@@ -15,6 +15,7 @@ Run alongside Layer-0 and optionally Layer-1:
 
 import json
 import os
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -525,8 +526,20 @@ def _follow_jsonl(path: str):
     while not os.path.exists(path):
         print(f"Waiting for {path} to appear...")
         time.sleep(FILE_WAIT_INTERVAL)
-    print(f"Opening {path} — reading history then following live updates...")
+    print(f"Opening {path} — bounded warm-up then following live updates...")
+    # Five minutes is sufficient to restore the active 1M/5M buckets without
+    # replaying the retained 1S history and duplicating aligned outputs.
+    raw = subprocess.getoutput(f"tail -300 {path} 2>/dev/null")
+    for line in raw.splitlines():
+        try:
+            record = json.loads(line)
+            if isinstance(record, dict):
+                yield record
+        except json.JSONDecodeError:
+            continue
+
     with open(path, "r", encoding="utf-8") as fh:
+        fh.seek(0, 2)
         while True:
             line = fh.readline()
             if line:

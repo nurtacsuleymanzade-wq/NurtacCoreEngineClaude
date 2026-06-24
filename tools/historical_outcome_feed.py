@@ -15,8 +15,9 @@ PAPER_TRADES = DATA / "paper_trades.jsonl"
 OUT = DATA / "historical_outcomes.jsonl"
 OUT_LATEST = DATA / "historical_outcomes_latest.json"
 REPORT = DATA / "historical_outcome_feed_report.json"
+TAIL_LIMIT = 10000
 
-def read_jsonl_tail(path, n=100000):
+def read_jsonl_tail(path, n=TAIL_LIMIT):
     if not path.exists():
         return []
     rows = []
@@ -47,7 +48,7 @@ def index_latest(rows):
 
 def existing_ids(path):
     ids = set()
-    for r in read_jsonl_tail(path, 200000):
+    for r in read_jsonl_tail(path, TAIL_LIMIT):
         sid = sid_of(r)
         if sid:
             ids.add(sid)
@@ -60,6 +61,11 @@ def is_closed(row):
         or row.get("outcome") is not None
         or row.get("closed_ts") is not None
     )
+
+
+def is_learning_eligible(row):
+    quality = (row.get("hit_candle") or {}).get("price_source_quality")
+    return is_closed(row) and quality == "verified_high_low"
 
 def quality_tier(score):
     if score is None:
@@ -188,13 +194,13 @@ def summarize(outcomes):
     }
 
 def main():
-    setups = index_latest(read_jsonl_tail(SETUPS, 100000))
-    births = index_latest(read_jsonl_tail(BIRTH, 100000))
-    lifecycles = index_latest(read_jsonl_tail(LIFECYCLE, 100000))
+    setups = index_latest(read_jsonl_tail(SETUPS, TAIL_LIMIT))
+    births = index_latest(read_jsonl_tail(BIRTH, TAIL_LIMIT))
+    lifecycles = index_latest(read_jsonl_tail(LIFECYCLE, TAIL_LIMIT))
 
     closed_rows = []
-    for r in read_jsonl_tail(PAPER_CLOSED, 100000) + read_jsonl_tail(PAPER_TRADES, 100000):
-        if is_closed(r):
+    for r in read_jsonl_tail(PAPER_CLOSED, TAIL_LIMIT) + read_jsonl_tail(PAPER_TRADES, TAIL_LIMIT):
+        if is_learning_eligible(r):
             closed_rows.append(r)
 
     done = existing_ids(OUT)
@@ -221,7 +227,7 @@ def main():
             new_outcomes.append(outcome)
             done.add(sid)
 
-    all_outcomes = read_jsonl_tail(OUT, 200000)
+    all_outcomes = read_jsonl_tail(OUT, TAIL_LIMIT)
     summary = summarize(all_outcomes)
 
     latest_payload = {

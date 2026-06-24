@@ -61,7 +61,7 @@ WAITING_TIMEOUT_MS    =  60_000   # 1 min
 DEVELOPING_TIMEOUT_MS = 120_000   # 2 min
 VOLUME_BOOST          = 1.3
 ATR_TOUCH_FACTOR      = 0.1       # ATR * 0.1 = touch range for HOLD
-LIVE_CACHE_MAX        = 300
+LIVE_CACHE_MAX        = 120
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:

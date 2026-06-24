@@ -13,6 +13,7 @@ Set FULL_PRINT=true for full JSON output instead of summary lines.
 
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -348,15 +349,26 @@ def _print_summary(obj: dict) -> None:
 def follow_jsonl(path: str):
     """Yield parsed JSON objects from a JSONL file.
 
-    Waits for the file to appear, reads all existing lines from the beginning,
-    then follows new lines as they are written (tail -f behaviour).
+    Warm up from only the records required by the largest rolling window, then
+    follow new lines. Replaying the full input on every restart duplicates all
+    rolling outputs and causes multi-gigabyte growth.
     """
     while not os.path.exists(path):
         print(f"Waiting for {path} to appear...")
         time.sleep(FILE_WAIT_INTERVAL)
 
-    print(f"Opening {path} — reading history then following live updates...")
+    print(f"Opening {path} — bounded warm-up then following live updates...")
+    raw = subprocess.getoutput(f"tail -{max(WINDOW_SIZES)} {path} 2>/dev/null")
+    for line in raw.splitlines():
+        try:
+            record = json.loads(line)
+            if isinstance(record, dict):
+                yield record
+        except json.JSONDecodeError:
+            continue
+
     with open(path, "r", encoding="utf-8") as fh:
+        fh.seek(0, 2)
         while True:
             line = fh.readline()
             if line:

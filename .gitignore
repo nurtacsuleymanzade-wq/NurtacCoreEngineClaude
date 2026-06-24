@@ -1,6 +1,14 @@
 .venv/
 __pycache__/
 data/*.jsonl
+data/*.json
+data/*.bak*
+data/archive/
+archive/
+*.bak
+*.bak.*
+*.bak_*
+audit_full.py
 *.pyc
 *.pyo
 .DS_Store

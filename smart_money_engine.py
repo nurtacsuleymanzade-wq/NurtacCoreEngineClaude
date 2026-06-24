@@ -50,6 +50,14 @@ TIMEFRAME_CONFIG = {
     "1H":  (DATA_DIR / "aligned_1h_candle_dna.jsonl",    DATA_DIR / "structure_1h.jsonl"),
 }
 
+WARMUP_RECORDS = {
+    "1S": 100,
+    "1M": 50,
+    "5M": 30,
+    "15M": 20,
+    "1H": 10,
+}
+
 EQH_EQL_ATR_RATIO = 0.05   # equal level threshold = ATR * 0.05
 MAX_OBS  = 3
 MAX_FVGS = 5
@@ -797,7 +805,7 @@ def _read_last_n_lines(path: Path, n: int = 200) -> list[dict]:
 def _run_batch_tf(tf: str, in_path: Path, out_path: Path,
                   baseline_atr: float) -> None:
     print(f"[SME][{tf}] Batch mode: reading {in_path}", flush=True)
-    records = _read_last_n_lines(in_path)
+    records = _read_last_n_lines(in_path, WARMUP_RECORDS.get(tf, 50))
     if not records:
         print(f"[SME][{tf}] No data in {in_path}", flush=True)
         return
@@ -880,7 +888,7 @@ async def _live_tf_task(tf: str, in_path: Path, out_path: Path,
     state = TFState(tf, baseline_atr)
 
     # Warm-up: process existing data (do NOT write to output)
-    existing = _read_last_n_lines(in_path)
+    existing = _read_last_n_lines(in_path, WARMUP_RECORDS.get(tf, 50))
     print(f"[SME][{tf}] Warm-up: {len(existing)} existing records", flush=True)
     for raw in existing:
         bar = _parse_line(tf, raw)

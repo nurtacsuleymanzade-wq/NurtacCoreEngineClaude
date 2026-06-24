@@ -1,63 +1,133 @@
 #!/bin/bash
-# Günlük veri rotasyonu - Python ile (disk dolsa bile çalışır)
-cd /root/NurtacCoreEngineClaude
-echo "=== ROTATE $(date) ===" 
-echo "Disk before:" && df -h /root | tail -1
+set -euo pipefail
 
-python3 << 'PYROTATE'
-import subprocess
+cd /root/NurtacCoreEngineClaude
+exec 9>/tmp/nurtac-rotate.lock
+if ! flock -n 9; then
+    echo "Rotation already running; skipped"
+    exit 0
+fi
+
+echo "=== ROTATE $(date -u) ==="
+df -h /root | tail -1
+
+SUPERVISOR_WAS_ACTIVE=false
+if systemctl is-active --quiet nurtac-supervisor; then
+    SUPERVISOR_WAS_ACTIVE=true
+    systemctl stop nurtac-supervisor
+    sleep 3
+fi
+
+restart_supervisor() {
+    if [ "$SUPERVISOR_WAS_ACTIVE" = true ]; then
+        systemctl start nurtac-supervisor
+    fi
+}
+trap restart_supervisor EXIT
+
+python3 <<'PYROTATE'
+import os
 from pathlib import Path
 
 DATA = Path("/root/NurtacCoreEngineClaude/data")
+MIB = 1024 * 1024
 
-files = {
-    "rolling_3s_dna.jsonl": 2000,
-    "rolling_5s_dna.jsonl": 2000,
-    "rolling_15s_dna.jsonl": 2000,
-    "aligned_1m_candle_dna.jsonl": 500,
-    "aligned_5m_candle_dna.jsonl": 500,
-    "aligned_15m_candle_dna.jsonl": 300,
-    "aligned_1h_candle_dna.jsonl": 200,
-    "aligned_4h_candle_dna.jsonl": 100,
-    "aligned_1d_candle_dna.jsonl": 50,
-    "historical_baseline_dna.jsonl": 500,
-    "labels_absorption.jsonl": 5000,
-    "labels_sweep.jsonl": 5000,
-    "labels_exhaustion.jsonl": 5000,
-    "labels_iceberg.jsonl": 5000,
-    "labels_trapped_trader.jsonl": 5000,
-    "labels_initiative_flow.jsonl": 5000,
-    "decision_gate_output.jsonl": 2000,
-    "evidence_stream.jsonl": 2000,
-    "scenarios.jsonl": 1000,
-    "setups.jsonl": 1000,
-    "structure_1s.jsonl": 2000,
-    "structure_1m.jsonl": 1000,
-    "structure_5m.jsonl": 500,
-    "volume_profile_session.jsonl": 500,
-    "volume_profile_1s.jsonl": 500,
-    "volume_profile_1m.jsonl": 500,
-    "regime_context.jsonl": 5000,
-    "footprint_live.jsonl": 1000,
-    "liquidation_clusters.jsonl": 500,
-    "liquidation_setups.jsonl": 2000,
-    "real_liquidations.jsonl": 5000,
-    "orderbook_walls.jsonl": 1000,
-    "whale_trades.jsonl": 5000,
-    "whale_trade_summary.jsonl": 500,
-    "whale_orders.jsonl": 2000,
-    "orderbook_stats.jsonl": 1000,
-    "footprint_dna_btcusdt.jsonl": 2000,
+# line limit, hard byte cap. The byte cap is authoritative because one DNA
+# record can contain a large footprint and line count alone is not RAM-safe.
+FILES = {
+    "rolling_15s_dna.jsonl": (1000, 96 * MIB),
+    "rolling_5s_dna.jsonl": (1000, 96 * MIB),
+    "rolling_3s_dna.jsonl": (1000, 96 * MIB),
+    "combined_1s_dna_btcusdt.jsonl": (30000, 128 * MIB),
+    "aligned_1m_candle_dna.jsonl": (5000, 96 * MIB),
+    "aligned_5m_candle_dna.jsonl": (3000, 96 * MIB),
+    "aligned_15m_candle_dna.jsonl": (2000, 96 * MIB),
+    "aligned_1h_candle_dna.jsonl": (2000, 96 * MIB),
+    "aligned_4h_candle_dna.jsonl": (1000, 96 * MIB),
+    "aligned_1d_candle_dna.jsonl": (500, 64 * MIB),
+    "historical_baseline_dna.jsonl": (5000, 64 * MIB),
+    "volume_profile_session.jsonl": (2000, 64 * MIB),
+    "volume_profile_1m.jsonl": (2000, 64 * MIB),
+    "volume_profile_1s.jsonl": (2000, 64 * MIB),
+    "structure_1s.jsonl": (5000, 32 * MIB),
+    "structure_1m.jsonl": (2000, 32 * MIB),
+    "structure_5m.jsonl": (1000, 32 * MIB),
+    "evidence_stream.jsonl": (3000, 32 * MIB),
+    "validation_report.jsonl": (2000, 16 * MIB),
+    "candle_dna_btcusdt.jsonl": (5000, 32 * MIB),
+    "depth_dna_btcusdt.jsonl": (5000, 32 * MIB),
+    "footprint_dna_btcusdt.jsonl": (3000, 32 * MIB),
+    "labels_absorption.jsonl": (5000, 16 * MIB),
+    "labels_sweep.jsonl": (5000, 16 * MIB),
+    "labels_exhaustion.jsonl": (5000, 16 * MIB),
+    "labels_iceberg.jsonl": (5000, 16 * MIB),
+    "labels_trapped_trader.jsonl": (5000, 16 * MIB),
+    "labels_initiative_flow.jsonl": (5000, 16 * MIB),
+    "decision_gate_output.jsonl": (3000, 16 * MIB),
+    "scenarios.jsonl": (3000, 16 * MIB),
+    "setups.jsonl": (3000, 16 * MIB),
+    "regime_context.jsonl": (5000, 16 * MIB),
+    "footprint_live.jsonl": (2000, 16 * MIB),
+    "liquidation_clusters.jsonl": (2000, 16 * MIB),
+    "liquidation_setups.jsonl": (2000, 16 * MIB),
+    "real_liquidations.jsonl": (5000, 16 * MIB),
+    "orderbook_walls.jsonl": (2000, 16 * MIB),
+    "whale_trades.jsonl": (5000, 16 * MIB),
+    "whale_trade_summary.jsonl": (1000, 16 * MIB),
+    "whale_orders.jsonl": (3000, 16 * MIB),
+    "orderbook_stats.jsonl": (2000, 16 * MIB),
 }
 
-for fname, n in files.items():
-    f = DATA / fname
-    if not f.exists():
+
+def bounded_tail(path: Path, line_limit: int, byte_limit: int) -> bytes:
+    size = path.stat().st_size
+    if size == 0:
+        return b""
+
+    chunks = []
+    newline_count = 0
+    bytes_read = 0
+    position = size
+    with path.open("rb") as source:
+        while position > 0 and newline_count <= line_limit and bytes_read < byte_limit:
+            read_size = min(MIB, position, byte_limit - bytes_read)
+            position -= read_size
+            source.seek(position)
+            chunk = source.read(read_size)
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            newline_count += chunk.count(b"\n")
+
+    data = b"".join(reversed(chunks))
+    if position > 0:
+        first_newline = data.find(b"\n")
+        data = data[first_newline + 1:] if first_newline >= 0 else b""
+    lines = data.splitlines(keepends=True)[-line_limit:]
+    output = b"".join(lines)
+    if output and not output.endswith(b"\n"):
+        output += b"\n"
+    return output
+
+
+for name, (line_limit, byte_limit) in FILES.items():
+    path = DATA / name
+    if not path.exists():
         continue
-    data = subprocess.getoutput(f"tail -{n} {f}").encode()
-    f.write_bytes(data)
+    old_size = path.stat().st_size
+    retained = bounded_tail(path, line_limit, byte_limit)
+    tmp = path.with_suffix(path.suffix + ".rotate.tmp")
+    with tmp.open("wb") as target:
+        target.write(retained)
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(tmp, path)
+    print(
+        f"{name}: {old_size / MIB:.1f}MB -> {len(retained) / MIB:.1f}MB "
+        f"({retained.count(bytes([10]))} lines)"
+    )
 
 print("Rotation complete")
 PYROTATE
 
-echo "Disk after:" && df -h /root | tail -1
+sync
+df -h /root | tail -1
