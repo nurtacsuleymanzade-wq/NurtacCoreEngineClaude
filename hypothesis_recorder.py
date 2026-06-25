@@ -131,9 +131,12 @@ class PriceBuffer:
                         d = json.loads(line)
                         ts = int(d.get("ts") or d.get("window_start_ts") or 0)
                         cdna = d.get("candle_dna") or {}
-                        close = float(cdna.get("close") or d.get("close") or 0)
-                        high = float(cdna.get("high") or close)
-                        low = float(cdna.get("low") or close)
+                        def _px(v):
+                            if isinstance(v, dict): return float(v.get("price") or 0)
+                            return float(v or 0)
+                        close = _px(cdna.get("close")) or _px(cdna.get("last_trade_price"))
+                        high  = _px(cdna.get("high"))  or close
+                        low   = _px(cdna.get("low"))   or close
                         if ts > 0 and close > 0:
                             self._buf.append((ts, close, high, low))
                     except (json.JSONDecodeError, ValueError, TypeError):
