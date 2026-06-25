@@ -132,83 +132,70 @@ def _log_message(msg_type: str, content: str, metadata: dict | None = None) -> N
         pass
 
 # ── Signal Message ─────────────────────────────────────────────────────────────
-def format_signal_message(setup: dict) -> str | None:
-    """Format SIGNAL message from final_setup record."""
-    # Check: PREMIUM or STANDARD quality
-    quality = setup.get("quality", "").upper()
-    if quality not in ["PREMIUM", "STANDARD"]:
-        return None
+def format_setup_message(setup: dict) -> str:
+    """
+    Qualified setup'tan Telegram mesajı oluştur.
+    INPUT:  qualified_setups.jsonl kaydı (dict)
+    OUTPUT: Telegram mesaj string
+    YASAK:  trade açmaz, dosya yazmaz
+    """
+    direction = str(setup.get("direction", "?")).upper()
+    tier = setup.get("quality_tier", "?")
+    score = setup.get("direction_score", 0)
 
-    # Check: long_bias or short_bias >= 60%
-    long_bias = _sf(setup.get("long_bias", 0))
-    short_bias = _sf(setup.get("short_bias", 0))
-    direction = None
-    bias_pct = 0
+    entry_d = setup.get("entry") or {}
+    sl_d = setup.get("sl") or {}
+    tp1_d = setup.get("tp1") or {}
+    tp2_d = setup.get("tp2") or {}
+    tp3_d = setup.get("tp3") or {}
 
-    if long_bias >= 60:
-        direction = "LONG"
-        bias_pct = int(long_bias)
-    elif short_bias >= 60:
-        direction = "SHORT"
-        bias_pct = int(short_bias)
-    else:
-        return None
+    entry = float(entry_d.get("price") or 0)
+    sl = float(sl_d.get("price") or 0)
+    tp1 = float(tp1_d.get("price") or 0)
+    tp2 = float(tp2_d.get("price") or 0)
+    tp3 = float(tp3_d.get("price") or 0)
 
-    # Extract data
-    ts = setup.get("window_start_ts")
-    price = _sf(setup.get("price", 0))
-    timeframe = setup.get("dominant_timeframe", "unknown")
-    entry = _sf(setup.get("entry", 0))
-    sl = _sf(setup.get("sl", 0))
-    tp1 = _sf(setup.get("tp1", 0))
-    tp2 = _sf(setup.get("tp2", 0))
-    tp3 = _sf(setup.get("tp3", 0))
+    sl_pct = abs(sl - entry) / entry * 100 if entry > 0 else 0
+    sl_sign = "+" if sl > entry else "-"
 
-    # Calculate percentages
-    sl_pct = abs((sl - entry) / entry * 100) if entry > 0 else 0
-    tp1_pct = abs((tp1 - entry) / entry * 100) if entry > 0 else 0
-    tp2_pct = abs((tp2 - entry) / entry * 100) if entry > 0 else 0
-    tp3_pct = abs((tp3 - entry) / entry * 100) if entry > 0 else 0
+    regime_ctx = setup.get("regime_context") or {}
+    regime = regime_ctx.get("trend_regime", "?")
+    session = regime_ctx.get("session", "?")
 
-    # Reason chain (from setup metadata)
-    reasons = []
-    if setup.get("smart_money_reason"):
-        reasons.append(f"- {setup['smart_money_reason']}")
-    if setup.get("detector_reason"):
-        reasons.append(f"- {setup['detector_reason']}")
-    if setup.get("baseline_reason"):
-        reasons.append(f"- {setup['baseline_reason']}")
-    if setup.get("market_context_reason"):
-        reasons.append(f"- {setup['market_context_reason']}")
-    if setup.get("volume_profile_reason"):
-        reasons.append(f"- {setup['volume_profile_reason']}")
+    macro_ctx = setup.get("macro_context") or {}
+    move_type = macro_ctx.get("move_type", "?")
+    sm_bias = macro_ctx.get("smart_money_bias", "?")
+    etf_sig = macro_ctx.get("etf_signal", "?")
+    cb_sig = macro_ctx.get("coinbase_signal", "?")
+    tt_div = macro_ctx.get("divergence_signal", "?")
+    mp_price = macro_ctx.get("max_pain_price", "?")
+    mp_bias = macro_ctx.get("max_pain_bias", "?")
 
-    reason_text = "\n".join(reasons[:5]) if reasons else "- N/A"
+    bd = setup.get("score_breakdown") or {}
+    cal_boost = bd.get("calibration", 0)
+    qblock = bd.get("quality_block", "")
 
-    # Historical win rate
-    similar_count = int(setup.get("similar_setups_count", 0))
-    historical_wr = _sf(setup.get("historical_win_rate", 0))
+    sim = setup.get("sim") or {}
+    risk_usd = sim.get("risk_usd", "?")
 
-    # Build message
-    emoji = "🟢" if direction == "LONG" else "🔴"
-    msg = f"""{emoji} {direction} SİNYAL — {SYMBOL}
-━━━━━━━━━━━━━━━━━━━
-⏰ {get_time_utc4()} | 💰 ${price:.2f}
-📊 Timeframe: {timeframe}
-🏆 Kalite: {quality} ({bias_pct}% {direction} bias)
+    dir_emoji = "📈" if direction == "LONG" else "📉"
 
-📍 Entry:  ${entry:.2f}
-🛡 SL:     ${sl:.2f}  ({sl_pct:.2f}%)
-🎯 TP1:    ${tp1:.2f}  ({tp1_pct:.2f}%)
-🎯 TP2:    ${tp2:.2f}  ({tp2_pct:.2f}%)
-🎯 TP3:    ${tp3:.2f}  ({tp3_pct:.2f}%)
-
-📈 Sebep-sonuç zinciri:
-{reason_text}
-
-🔢 Geçmiş: {similar_count} benzer setup → %{int(historical_wr)} WR
-"""
-    return msg
+    return (
+        f"{dir_emoji} *SETUP: {direction} {tier}*\n"
+        f"{'─'*25}\n"
+        f"💰 Entry: `${entry:,.2f}`\n"
+        f"🛡 SL: `${sl:,.2f}` ({sl_sign}{sl_pct:.2f}%)\n"
+        f"🎯 TP1: `${tp1:,.0f}` | TP2: `${tp2:,.0f}` | TP3: `${tp3:,.0f}`\n"
+        f"{'─'*25}\n"
+        f"⚡ Score: `{score}` | Risk: `${risk_usd}`\n"
+        f"📍 Rejim: `{regime}` | Session: `{session}`\n"
+        f"🌊 Macro: `{move_type}` | SM: `{sm_bias}`\n"
+        f"🐋 Top Trader: `{tt_div}` | ETF: `{etf_sig}`\n"
+        f"💸 Coinbase: `{cb_sig}` | MaxPain: `${mp_price}` ({mp_bias})\n"
+        f"{'─'*25}\n"
+        f"{'⚠️ Block: ' + qblock if qblock else '✅ Kalite: OK'}\n"
+        f"📊 Cal boost: `{cal_boost}`"
+    )
 
 # ── 15 Minute Report ───────────────────────────────────────────────────────────
 def format_15min_report(trades: list[dict], current_price: float | None = None) -> str:
@@ -306,11 +293,11 @@ async def run_live() -> None:
     while not HALT_FILE.exists():
         try:
             # Check for new signals
-            final_setups = _read_last_jsonl(FINAL_SETUPS_FILE, maxlen=50)
+            final_setups = _read_last_jsonl(QUALIFIED_SETUPS_FILE, maxlen=50)
             for setup in final_setups:
-                signal_id = f"{setup.get('window_start_ts', 0)}_{setup.get('setup_id', '')}"
+                signal_id = f"{setup.get('qualification_ts', 0)}_{setup.get('qualified_setup_id', '')}"
                 if signal_id not in sent_signal_ids:
-                    msg = format_signal_message(setup)
+                    msg = format_setup_message(setup)
                     if msg:
                         if _send_telegram(msg):
                             sent_signal_ids.add(signal_id)
