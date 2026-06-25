@@ -233,6 +233,27 @@ class ObservedSetup:
     def _obs_write(self, ts: int, event: str, old_state: str, new_state: str,
                    cur_price: float, details: str, obs_fh) -> None:
         """Write one observation record."""
+        details_l = (details or "").lower()
+        f_gates = {
+            "f1_bos": "bos" in details_l or "breakout" in details_l or "reclaim" in details_l,
+            "f2_volume": "vol" in details_l or "volume" in details_l,
+            "f3_regime": "regime" in details_l,
+            "f4_structure": "structure" in details_l or "acceptance" in details_l,
+            "f5_confirmation": "confirm" in details_l or "follow-through" in details_l or "follow_through" in details_l,
+        }
+        blocking_gate = ""
+        if new_state == "INVALIDATED":
+            if "regime" in details_l:
+                blocking_gate = "REGIME_MISMATCH"
+            elif "breakout" in details_l or "weak" in details_l:
+                blocking_gate = "BREAKOUT_WEAK"
+            else:
+                blocking_gate = event
+        elif new_state == "QUALIFYING":
+            blocking_gate = "QUALIFYING"
+        elif new_state == "DEVELOPING":
+            blocking_gate = "DEVELOPING"
+        observer_reason = details or ""
         rec = {
             "engine":          "observer_engine",
             "ts":              ts,
@@ -243,6 +264,12 @@ class ObservedSetup:
             "state_after":     new_state,
             "current_price":   cur_price,
             "details":         details,
+            "f_gates":         f_gates,
+            "blocking_gate":   blocking_gate,
+            "observer_reason":  observer_reason,
+            "bos_ok":          f_gates["f1_bos"],
+            "vol_ok":          f_gates["f2_volume"],
+            "regime_ok":       f_gates["f3_regime"],
         }
         _write_jsonl(obs_fh, rec)
 
@@ -812,6 +839,18 @@ class ObservedSetup:
             "entry_timing": self.entry_timing,
             "volatility_at_qualification": regime.get("volatility_class"),
             "details": "all regime and F1-F5 criteria met",
+            "f_gates": {
+                "f1_bos": True,
+                "f2_volume": True,
+                "f3_regime": True,
+                "f4_structure": True,
+                "f5_confirmation": True,
+            },
+            "blocking_gate": "",
+            "observer_reason": "all regime and F1-F5 criteria met",
+            "bos_ok": True,
+            "vol_ok": True,
+            "regime_ok": True,
         })
         _print_qualified(qual_rec, self.atr_used)
 
