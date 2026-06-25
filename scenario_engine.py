@@ -31,7 +31,7 @@ DATA_DIR  = Path("data")
 HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 FULL_PRINT = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_SLEEP = 0.05
-LIVE_CACHE_MAX = 120
+LIVE_CACHE_MAX = 60
 
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 MEMORY_FILE    = DATA_DIR / "scenario_memory.jsonl"
@@ -908,18 +908,18 @@ def run_batch() -> None:
     print("[SCEN] Batch mode — loading input files (warm-up limits)", flush=True)
 
     # Warm-up: load only last N lines per file (memory-efficient)
-    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
-    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=300))
-    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=100))
-    s5m_idx      = _build_index(_read_last_n_jsonl(STRUCT_5M_FILE, maxlen=100))
-    vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
-    vp_ses_idx   = _build_index(_read_last_n_jsonl(VOL_SES_FILE, maxlen=100))
-    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=100))
-    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=100)) for d, p in DETECTOR_FILES.items()}
-    liq_idx      = _build_index(_read_last_n_jsonl(LIQ_FILE, maxlen=100))
-    real_liqs_window = _read_last_n_jsonl(REAL_LIQ_FILE, maxlen=200)
+    primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=150)
+    s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=150))
+    s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=60))
+    s5m_idx      = _build_index(_read_last_n_jsonl(STRUCT_5M_FILE, maxlen=60))
+    vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=60))
+    vp_ses_idx   = _build_index(_read_last_n_jsonl(VOL_SES_FILE, maxlen=60))
+    gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=60))
+    det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=60)) for d, p in DETECTOR_FILES.items()}
+    liq_idx      = _build_index(_read_last_n_jsonl(LIQ_FILE, maxlen=60))
+    real_liqs_window = _read_last_n_jsonl(REAL_LIQ_FILE, maxlen=120)
 
-    bl_recs    = _read_last_n_jsonl(BASELINE_FILE, maxlen=100)
+    bl_recs    = _read_last_n_jsonl(BASELINE_FILE, maxlen=60)
     baseline_1s = _load_baseline_1s(bl_recs)
     baseline_1m = _load_baseline_1m(bl_recs)
     bias_rec   = _read_last_line(BIAS_FILE)
@@ -1002,7 +1002,7 @@ class LiveCtx:
         self.vp_s: dict[int, dict] = {}
         self.gate: dict[int, dict] = {}
         self.liq:  dict[int, dict] = {}
-        self.real_liqs: deque[dict] = deque(maxlen=200)
+        self.real_liqs: deque[dict] = deque(maxlen=100)
         self.dets: dict[str, dict[int, dict]] = {d: {} for d in DETECTOR_FILES}
         self.baseline_1s: dict | None = None
         self.bias:        dict | None = None
@@ -1168,7 +1168,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
 
     # _read_last_n_jsonl tüm dosyayı tarar — thread pool'da çalıştır.
     loop = asyncio.get_event_loop()
-    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 120)
+    existing = await loop.run_in_executor(None, _read_last_n_jsonl, PRIMARY_FILE, 60)
     print(f"[SCEN] Warm-up: {len(existing)} existing primary records", flush=True)
 
     _trim_counter = [0]

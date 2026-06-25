@@ -27,6 +27,7 @@ SYMBOL           = "BTCUSDT"
 DATA_DIR         = Path("data")
 HALT_FILE        = DATA_DIR / "SYSTEM_HALT"
 OUTPUT_FILE      = DATA_DIR / "decision_gate_output.jsonl"
+CALIBRATION_VIEW_FILE = DATA_DIR / "decision_gate_calibration_view.json"
 FULL_PRINT       = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL    = 0.05
 FILE_WAIT_SLEEP  = 2.0
@@ -60,6 +61,7 @@ BEARISH_DIRS: dict[str, set[str]] = {
 
 # ── Shared state ────────────────────────────────────────────────────────────────
 _baseline_1m: dict | None = None
+_gate_calibration_cache: dict | None = None
 
 
 # ── Utilities ───────────────────────────────────────────────────────────────────
@@ -97,6 +99,28 @@ def _load_baseline() -> None:
                     _baseline_1m = rec
     except OSError:
         pass
+
+
+def _load_gate_calibration() -> dict:
+    """
+    Load an optional calibration view used to downgrade low-WR patterns.
+    """
+    global _gate_calibration_cache
+    if _gate_calibration_cache is not None:
+        return _gate_calibration_cache
+    try:
+        if CALIBRATION_VIEW_FILE.exists():
+            data = json.loads(CALIBRATION_VIEW_FILE.read_text())
+            if isinstance(data, dict):
+                _gate_calibration_cache = {
+                    k: v for k, v in data.items()
+                    if isinstance(v, dict) and v.get("count", 0) >= 20
+                }
+                return _gate_calibration_cache
+    except Exception:
+        pass
+    _gate_calibration_cache = {}
+    return _gate_calibration_cache
 
 
 def _read_last_n_lines(path: Path, n: int = 200) -> tuple[list[dict], int]:
@@ -231,6 +255,10 @@ def _compute_gate(ts: int, window_end_ts: int,
                     strong_bonus += 0.5
 
     quality_score = float(confluence_score) + strong_bonus
+    score_breakdown = {
+        "confluence_score": confluence_score,
+        "strong_bonus": strong_bonus,
+    }
 
     # Setup grade
     if quality_score >= 4.0 and aligned_count >= 3:
@@ -246,6 +274,32 @@ def _compute_gate(ts: int, window_end_ts: int,
         final_direction = "neutral"
     else:
         final_direction = dominant_direction
+
+    gate_cal = _load_gate_calibration()
+    if gate_cal:
+        s_type = "normal"
+        for det_info in summary.values():
+            if isinstance(det_info, dict):
+                s_type = det_info.get("setup_type", s_type)
+                if s_type != "normal":
+                    break
+        pattern = f"{s_type}_{dominant_direction}"
+        cal_info = gate_cal.get(pattern)
+        if cal_info:
+            cal_wr = cal_info.get("total_wr")
+            if cal_wr is None:
+                cal_wr = cal_info.get("wr", 0.5)
+            cal_n = cal_info.get("count", 0)
+            if cal_wr < 0.40 and cal_n >= 20 and setup_grade in ("A", "B", "C"):
+                grade_map = {"A": 2, "B": 1, "C": 0}
+                reverse_map = {2: "A", 1: "B", 0: "C"}
+                current = grade_map.get(setup_grade, 1)
+                new_grade = max(0, current - 1)
+                setup_grade = reverse_map[new_grade]
+                if isinstance(score_breakdown, dict):
+                    score_breakdown["cal_gate_downgrade"] = (
+                        f"wr={cal_wr:.1%} n={cal_n} grade_down"
+                    )
 
     # Baseline context
     bl = _baseline_1m
@@ -305,6 +359,7 @@ def _compute_gate(ts: int, window_end_ts: int,
         "dominant_direction": final_direction if setup_grade != "none" else "neutral",
         "confluence_score": confluence_score,
         "quality_score": quality_score,
+        "score_breakdown": score_breakdown,
         "detector_summary": summary,
         "baseline_context": baseline_context,
         "bullish_count": bullish_count,

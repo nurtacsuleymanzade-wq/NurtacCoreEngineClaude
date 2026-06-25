@@ -45,6 +45,8 @@ OUTPUT_FILES = {
     "initiative_flow": DATA_DIR / "labels_initiative_flow.jsonl",
 }
 
+_DETECTOR_LAST_KEY: dict[str, str] = {}
+
 MAX_SCORE = {
     "absorption": 5, "sweep": 4, "exhaustion": 5,
     "iceberg": 5, "trapped_trader": 5, "initiative_flow": 6,
@@ -206,6 +208,30 @@ def _write_label(detector: str, record: dict) -> None:
             os.fsync(fh.fileno())
     except OSError as e:
         print(f"[{detector.upper()}] write error: {e}")
+
+
+def _should_write_detector(detector_name: str, record: dict) -> bool:
+    """
+    Avoid repeated writes for the same (ts, label) pair per detector.
+    """
+    ts = record.get("ts") or record.get("window_start_ts") or 0
+    label = str(record.get("label", ""))
+    composite_key = f"{ts}_{label}"
+
+    last_key = _DETECTOR_LAST_KEY.get(detector_name, "")
+    if composite_key == last_key:
+        return False
+
+    if last_key:
+        try:
+            last_ts = int(last_key.split("_", 1)[0])
+            if ts > 0 and ts < last_ts - 5000:
+                return False
+        except (ValueError, IndexError):
+            pass
+
+    _DETECTOR_LAST_KEY[detector_name] = composite_key
+    return True
 
 
 def _validate_output(rec: dict, detector: str) -> list[str]:
@@ -1093,8 +1119,9 @@ async def _task_absorption() -> None:
         if errs:
             print(f"[VALIDATION FAIL] absorption ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("absorption", rec)
-            _print_label(rec)
+            if _should_write_detector("absorption", rec):
+                _write_label("absorption", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_1S, pos):
         rec  = _detect_absorption(row)
         errs = _validate_output(rec, "absorption")
@@ -1114,8 +1141,9 @@ async def _task_sweep() -> None:
         if errs:
             print(f"[VALIDATION FAIL] sweep ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("sweep", rec)
-            _print_label(rec)
+            if _should_write_detector("sweep", rec):
+                _write_label("sweep", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_1S, pos):
         rec  = _detect_sweep(row)
         errs = _validate_output(rec, "sweep")
@@ -1137,8 +1165,9 @@ async def _task_iceberg() -> None:
         if errs:
             print(f"[VALIDATION FAIL] iceberg ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("iceberg", rec)
-            _print_label(rec)
+            if _should_write_detector("iceberg", rec):
+                _write_label("iceberg", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_1S, pos):
         buf.append(row)
         rec  = _detect_iceberg(row, buf)
@@ -1159,8 +1188,9 @@ async def _task_exhaustion() -> None:
         if errs:
             print(f"[VALIDATION FAIL] exhaustion ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("exhaustion", rec)
-            _print_label(rec)
+            if _should_write_detector("exhaustion", rec):
+                _write_label("exhaustion", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_3S, pos):
         rec  = _detect_exhaustion(row)
         errs = _validate_output(rec, "exhaustion")
@@ -1180,8 +1210,9 @@ async def _task_trapped_trader() -> None:
         if errs:
             print(f"[VALIDATION FAIL] trapped_trader ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("trapped_trader", rec)
-            _print_label(rec)
+            if _should_write_detector("trapped_trader", rec):
+                _write_label("trapped_trader", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_3S, pos):
         rec  = _detect_trapped_trader(row)
         errs = _validate_output(rec, "trapped_trader")
@@ -1202,8 +1233,9 @@ async def _task_initiative_flow() -> None:
         if errs:
             print(f"[VALIDATION FAIL] initiative_flow ts={rec.get('window_start_ts')}: {'; '.join(errs)}")
         else:
-            _write_label("initiative_flow", rec)
-            _print_label(rec)
+            if _should_write_detector("initiative_flow", rec):
+                _write_label("initiative_flow", rec)
+                _print_label(rec)
     async for row in _tail_file(INPUT_5S, pos):
         _buf_5s.append(row)
         rec  = _detect_initiative_flow(row)

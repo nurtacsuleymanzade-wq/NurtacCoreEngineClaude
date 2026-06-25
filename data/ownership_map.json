@@ -1,0 +1,93 @@
+{
+  "calibration_profiles.json": {
+    "writer": "tools/calibration_feed.py",
+    "readers": [
+      "evidence_engine.py",
+      "decision_gate.py"
+    ],
+    "mode": "BATCH",
+    "schema_v": 2,
+    "note": "N<20 pattern score_boost=0.0, wilson_lower hesapli"
+  },
+  "historical_outcomes.jsonl": {
+    "writer": "tools/historical_outcome_feed.py",
+    "readers": [
+      "tools/calibration_feed.py"
+    ],
+    "mode": "BATCH_APPEND",
+    "schema_v": 1,
+    "note": "Sadece verified_high_low kapanislar"
+  },
+  "paper_closed.jsonl": {
+    "writer": "tools/paper_close_engine.py",
+    "readers": [
+      "tools/historical_outcome_feed.py"
+    ],
+    "mode": "BATCH_APPEND",
+    "schema_v": 1,
+    "note": "close_only kabul edilmez"
+  },
+  "edge_matrix.jsonl": {
+    "writer": "edge_matrix_engine.py",
+    "readers": [
+      "evidence_engine.py"
+    ],
+    "mode": "BATCH",
+    "schema_v": 1,
+    "note": "Cursor-based streaming"
+  },
+  "decision_gate_calibration_view.json": {
+    "writer": "tools/calibration_feed.py",
+    "readers": [
+      "decision_gate.py"
+    ],
+    "mode": "BATCH",
+    "schema_v": 1,
+    "note": "Gate N>=20 pattern kullanir"
+  },
+  "setups.jsonl": {
+    "writer": "evidence_engine.py",
+    "readers": [
+      "observer_engine.py"
+    ],
+    "mode": "LIVE_APPEND",
+    "schema_v": 3,
+    "note": "quality_block alani mevcut"
+  },
+  "qualified_setups.jsonl": {
+    "writer": "observer_engine.py",
+    "readers": [
+      "paper_trade_engine.py"
+    ],
+    "mode": "LIVE_APPEND",
+    "schema_v": 2,
+    "note": "quality_block olan setups SKIP edilir"
+  },
+  "macro_context.json": {
+    "writer": "macro_context_engine.py",
+    "readers": [
+      "evidence_engine.py"
+    ],
+    "mode": "LIVE_OVERWRITE",
+    "schema_v": 2,
+    "note": "5 dakikada bir, JSONL degil"
+  },
+  "max_pain.json": {
+    "writer": "max_pain_engine.py",
+    "readers": [
+      "evidence_engine.py"
+    ],
+    "mode": "LIVE_OVERWRITE",
+    "schema_v": 1,
+    "note": "Saatlik Deribit REST"
+  },
+  "liquidation_setups.jsonl": {
+    "writer": "liquidation_engine.py",
+    "readers": [
+      "observer_engine.py"
+    ],
+    "mode": "LIVE_APPEND",
+    "schema_v": 1,
+    "note": "setups.jsonl ile ayni schema + liq_context"
+  }
+}
