@@ -57,7 +57,7 @@ DETECTOR_FILES = {
 
 MAX_OPEN_SETUPS       = 10
 SETUP_LIFETIME_MS     = 300_000   # 5 min
-WAITING_TIMEOUT_MS    =  60_000   # 1 min
+WAITING_TIMEOUT_MS    = 120_000   # 2 min - setup olgunlassin
 DEVELOPING_TIMEOUT_MS = 120_000   # 2 min
 VOLUME_BOOST          = 1.3
 ATR_TOUCH_FACTOR      = 0.1       # ATR * 0.1 = touch range for HOLD
@@ -644,7 +644,7 @@ class ObservedSetup:
             not compatible or any(c in setup_type_str for c in compatible)
         )
         session = regime.get("session", "UNKNOWN") if regime else "UNKNOWN"
-        bad_sessions = {"OFF_HOURS", "ASIA"}
+        bad_sessions = {"OFF_HOURS"}  # ASIA kaldirildi - 00:00-08:00 UTC artik acik
         f_session = session not in bad_sessions or self.setup_type in ["REVERSAL", "RECLAIM"]
         f_timing = self.entry_timing not in ("extended",)
         if self.direction == "long":

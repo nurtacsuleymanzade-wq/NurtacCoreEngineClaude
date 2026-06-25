@@ -68,8 +68,8 @@ DETECTOR_FILES = {
 EDGE_BONUS_STRONG   = 1.0   # added to a detector's score bucket when edge_matrix says "strong"
 EDGE_PENALTY_NEGATIVE = 1.0 # subtracted when edge_matrix says "negative"
 
-MIN_LONG_SCORE_NORMAL = 4.0   # L1_LOW minimum
-MIN_LONG_SCORE_FLASH  = 12.0
+MIN_LONG_SCORE_NORMAL = 3.0   # L1_LOW minimum, dusuruldu
+MIN_LONG_SCORE_FLASH  = 7.0   # 12.0 hic acilmiyordu
 
 # Kalite tierlari
 TIER_L1_LOW     = 4.0
