@@ -70,6 +70,8 @@ FILES = {
     "footprint_live.jsonl": (2000, 16 * MIB),
     "liquidation_clusters.jsonl": (2000, 16 * MIB),
     "liquidation_setups.jsonl": (2000, 16 * MIB),
+    "hypothesis_outcomes.jsonl": (5000, 16 * MIB),
+    "hypothesis_cursors.json": (1, 1 * MIB),
     "real_liquidations.jsonl": (5000, 16 * MIB),
     "orderbook_walls.jsonl": (2000, 16 * MIB),
     "whale_trades.jsonl": (5000, 16 * MIB),
