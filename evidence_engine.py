@@ -322,6 +322,26 @@ def _get_latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
         return None
     return idx[max(candidates)]
 
+def _get_latest_compatible_gate(idx: dict[int, dict], ts: int) -> dict | None:
+    """Return the newest gate row whose window covers ts, or the newest prior row."""
+    if not idx:
+        return None
+
+    compatible: list[int] = []
+    prior: list[int] = []
+    for gate_ts, rec in idx.items():
+        gate_end = _sf(rec.get("window_end_ts"), gate_ts)
+        if gate_ts <= ts <= int(gate_end):
+            compatible.append(gate_ts)
+        elif gate_ts <= ts:
+            prior.append(gate_ts)
+
+    if compatible:
+        return idx[max(compatible)]
+    if prior:
+        return idx[max(prior)]
+    return None
+
 def _write_jsonl(fh, rec: dict) -> None:
     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     fh.flush()
@@ -532,9 +552,35 @@ def compute_evidence(
     gate_grade = None
     gate_dir   = None
     g_comp: dict[str, bool] = {}
+    gate_ctx: dict[str, object] = {
+        "grade": None,
+        "direction": "neutral",
+        "confidence_score": 0.0,
+        "quality_score": 0.0,
+        "source_window_start_ts": None,
+        "source_window_end_ts": None,
+        "join_status": "missing",
+    }
     if gate:
         gate_grade = gate.get("setup_grade")
         gate_dir   = gate.get("dominant_direction")
+        gate_ctx = {
+            "grade": gate_grade,
+            "direction": gate_dir or "neutral",
+            "confidence_score": _sf(gate.get("confluence_score"), 0.0),
+            "quality_score": _sf(gate.get("quality_score"), 0.0),
+            "source_window_start_ts": gate.get("window_start_ts"),
+            "source_window_end_ts": gate.get("window_end_ts"),
+            "join_status": "matched_latest_at_or_before",
+        }
+        if gate_ctx["direction"] in ("bullish", "long"):
+            g_comp["gate_long_active"] = True
+            score_breakdown["gate_long"] = max(score_breakdown.get("gate_long", 0.0), 1.0 if gate_grade in ("A", "B", "C") else 0.5)
+            long_score += score_breakdown["gate_long"]
+        elif gate_ctx["direction"] in ("bearish", "short"):
+            g_comp["gate_short_active"] = True
+            score_breakdown["gate_short"] = max(score_breakdown.get("gate_short", 0.0), 1.0 if gate_grade in ("A", "B", "C") else 0.5)
+            short_score += score_breakdown["gate_short"]
         for grade, pts in [("A", 3.0), ("B", 2.0), ("C", 1.0)]:
             gb = gate_grade == grade and gate_dir == "bullish"
             bb = gate_grade == grade and gate_dir == "bearish"
@@ -545,6 +591,7 @@ def compute_evidence(
     g_comp["grade"]     = gate_grade
     g_comp["direction"] = gate_dir
     comps["gate"] = g_comp
+    comps["gate_context"] = gate_ctx
     score_breakdown["gate_long"]  = round(long_score  - _pre_long,  4)
     score_breakdown["gate_short"] = round(short_score - _pre_short, 4)
 
@@ -1248,6 +1295,15 @@ def try_generate_setup(
 
     gate_grade = (gate or {}).get("setup_grade")
     gate_dir   = (gate or {}).get("dominant_direction")
+    gate_ctx   = {
+        "grade":                  gate_grade,
+        "direction":              gate_dir or "neutral",
+        "confidence_score":       float((gate or {}).get("confluence_score") or 0.0),
+        "quality_score":          float((gate or {}).get("quality_score") or 0.0),
+        "source_window_start_ts": (gate or {}).get("window_start_ts"),
+        "source_window_end_ts":   (gate or {}).get("window_end_ts"),
+        "join_status":            "matched" if gate else "missing",
+    }
     s1s_trend  = (s1s or {}).get("trend") or {}
     s1s_bos    = (s1s or {}).get("bos") or {}
     s1m_trend  = (s1m or {}).get("trend") or {}
@@ -1366,6 +1422,7 @@ def try_generate_setup(
             "score_breakdown": setup_breakdown,
             "context": {
                 "gate_grade":      gate_grade,
+                "gate":            gate_ctx,
                 "micro_bos":       micro_bos,
                 "macro_bos":       (s1m or {}).get("bos", {}).get("macro_bos"),
                 "trend_1s":        trend_1s,
@@ -1457,6 +1514,7 @@ def try_generate_setup(
             setup["quality_tier"] = "L1_LOW"
         if block_reason:
             setup["score_breakdown"]["quality_block"] = block_reason
+            setup["quality_reason"] = block_reason
         # ──────────────────────────────────────────────────────────────────────
         _write_jsonl(setups_fh, setup)
         state.emitted_ids.add(setup["setup_id"])
@@ -1616,11 +1674,17 @@ def run_batch() -> None:
                 continue
             ts = int(ts)
 
-            gate    = gate_idx.get(ts)
+            gate    = _get_latest_compatible_gate(gate_idx, ts)
             s1s     = _get_latest_at_or_before(s1s_idx, ts)
             s1m     = _get_latest_at_or_before(s1m_idx, ts)
             s5m     = _get_latest_at_or_before(s5m_idx, ts)
-            det_rec = {d: det_idxs[d].get(ts) for d in DETECTOR_FILES}
+            # Detector files are emitted on 3S/5S windows, so the exact 1S ts
+            # often does not exist in the detector index. Use the most recent
+            # detector record at or before the primary bar ts.
+            det_rec = {
+                d: _get_latest_at_or_before(det_idxs[d], ts)
+                for d in DETECTOR_FILES
+            }
             regime  = _get_latest_at_or_before(regime_idx, ts)
             liquidation = _get_latest_at_or_before(liq_idx, ts)
             walls = _get_latest_at_or_before(wall_idx, ts)
@@ -1822,11 +1886,17 @@ async def _primary_task(ctx: LiveCtx) -> None:
                 continue
             ts = int(ts)
 
-            gate    = ctx.gate.get(ts)
+            gate    = _get_latest_compatible_gate(ctx.gate, ts)
             s1s     = _get_latest_at_or_before(ctx.s1s, ts)
             s1m     = _get_latest_at_or_before(ctx.s1m, ts)
             s5m     = _get_latest_at_or_before(ctx.s5m, ts)
-            det_rec = {d: ctx.dets[d].get(ts) for d in DETECTOR_FILES}
+            # Detector files are emitted on 3S/5S windows, so the exact 1S ts
+            # often does not exist in the detector cache. Use the most recent
+            # detector record at or before the primary bar ts.
+            det_rec = {
+                d: _get_latest_at_or_before(ctx.dets[d], ts)
+                for d in DETECTOR_FILES
+            }
             regime  = _get_latest_at_or_before(ctx.regime, ts)
             liquidation = _get_latest_at_or_before(ctx.liquidation, ts)
             walls = _get_latest_at_or_before(ctx.walls, ts)
