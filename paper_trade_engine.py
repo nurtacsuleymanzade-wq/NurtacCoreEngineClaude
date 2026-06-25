@@ -166,6 +166,50 @@ def calc_pnl_usd(trade: dict, close_price: float) -> dict:
         "rr_actual": round(rr, 2),
     }
 
+def _risk_gate(setup: dict) -> tuple[bool, str, float]:
+    """
+    Trade açılmadan önce RR ve geometri kontrolü.
+    INPUT: qualified setup dict
+    OUTPUT: (geçti: bool, sebep: str, rr: float)
+    """
+    direction = setup.get("direction", "")
+    entry_d = setup.get("entry") or {}
+    sl_d = setup.get("sl") or {}
+    tp1_d = setup.get("tp1") or {}
+
+    entry = float(entry_d.get("price") or 0)
+    sl = float(sl_d.get("price") or 0)
+    tp1 = float(tp1_d.get("price") or 0)
+
+    if entry <= 0 or sl <= 0 or tp1 <= 0:
+        return False, f"MISSING_PRICES entry={entry} sl={sl} tp1={tp1}", 0.0
+
+    risk = abs(sl - entry)
+    reward = abs(tp1 - entry)
+
+    if risk < 0.01:
+        return False, f"SL_TOO_CLOSE risk={risk:.4f}", 0.0
+
+    rr = round(reward / risk, 3)
+
+    # SL yanlış tarafta mı?
+    if direction == "long" and sl >= entry:
+        return False, f"SL_WRONG_SIDE sl={sl} >= entry={entry}", rr
+    if direction == "short" and sl <= entry:
+        return False, f"SL_WRONG_SIDE sl={sl} <= entry={entry}", rr
+
+    # TP yanlış tarafta mı?
+    if direction == "long" and tp1 <= entry:
+        return False, f"TP_WRONG_SIDE tp1={tp1} <= entry={entry}", rr
+    if direction == "short" and tp1 >= entry:
+        return False, f"TP_WRONG_SIDE tp1={tp1} >= entry={entry}", rr
+
+    # Minimum RR kontrolü
+    if rr < 1.2:
+        return False, f"RR_TOO_LOW rr={rr} < 1.2", rr
+
+    return True, "OK", rr
+
 # ── Timeframe source inference ────────────────────────────────────────────────
 def _infer_timeframe(setup: dict) -> str:
     st  = setup.get("setup_type", "")
@@ -354,6 +398,10 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     tp1_price = _sf(tgt_obj.get("tp1"),        0.0)
     tp2_price = _sf(tgt_obj.get("tp2"),        0.0)
     tp3_price = _sf(tgt_obj.get("tp3"),        0.0)
+    rg_pass, rg_reason, rg_rr = _risk_gate(setup)
+    if not rg_pass:
+        print(f"[PAPER] RISK_GATE BLOCK: {rg_reason}", flush=True)
+        return False
     setup_type      = setup.get("setup_type", "normal")
     quality_tier    = setup.get("quality_tier", "L1_LOW")
     timeframe_source = _infer_timeframe(setup)
