@@ -139,47 +139,38 @@ def format_setup_message(setup: dict) -> str:
     OUTPUT: Telegram mesaj string
     YASAK:  trade açmaz, dosya yazmaz
     """
-    direction = str(setup.get("direction", "?")).upper()
-    tier = setup.get("quality_tier", "?")
-    score = setup.get("direction_score", 0)
-
-    entry_d = setup.get("entry") or {}
-    sl_d = setup.get("sl") or {}
-    tp1_d = setup.get("tp1") or {}
-    tp2_d = setup.get("tp2") or {}
-    tp3_d = setup.get("tp3") or {}
-
+    direction  = str(setup.get("direction", "?")).upper()
+    tier       = setup.get("quality_tier", "?")
+    score      = setup.get("direction_score", 0)
+    entry_d    = setup.get("entry") or {}
+    sl_d       = setup.get("sl")    or {}
+    tp1_d      = setup.get("tp1")   or {}
+    tp2_d      = setup.get("tp2")   or {}
+    tp3_d      = setup.get("tp3")   or {}
     entry = float(entry_d.get("price") or 0)
-    sl = float(sl_d.get("price") or 0)
-    tp1 = float(tp1_d.get("price") or 0)
-    tp2 = float(tp2_d.get("price") or 0)
-    tp3 = float(tp3_d.get("price") or 0)
-
-    sl_pct = abs(sl - entry) / entry * 100 if entry > 0 else 0
+    sl    = float(sl_d.get("price")    or 0)
+    tp1   = float(tp1_d.get("price")   or 0)
+    tp2   = float(tp2_d.get("price")   or 0)
+    tp3   = float(tp3_d.get("price")   or 0)
+    sl_pct  = abs(sl - entry) / entry * 100 if entry > 0 else 0
     sl_sign = "+" if sl > entry else "-"
-
     regime_ctx = setup.get("regime_context") or {}
-    regime = regime_ctx.get("trend_regime", "?")
-    session = regime_ctx.get("session", "?")
-
-    macro_ctx = setup.get("macro_context") or {}
-    move_type = macro_ctx.get("move_type", "?")
-    sm_bias = macro_ctx.get("smart_money_bias", "?")
-    etf_sig = macro_ctx.get("etf_signal", "?")
-    cb_sig = macro_ctx.get("coinbase_signal", "?")
-    tt_div = macro_ctx.get("divergence_signal", "?")
-    mp_price = macro_ctx.get("max_pain_price", "?")
-    mp_bias = macro_ctx.get("max_pain_bias", "?")
-
-    bd = setup.get("score_breakdown") or {}
-    cal_boost = bd.get("calibration", 0)
-    qblock = bd.get("quality_block", "")
-
-    sim = setup.get("sim") or {}
-    risk_usd = sim.get("risk_usd", "?")
-
-    dir_emoji = "📈" if direction == "LONG" else "📉"
-
+    regime     = regime_ctx.get("trend_regime", "?")
+    session    = regime_ctx.get("session", "?")
+    macro_ctx  = setup.get("macro_context") or {}
+    move_type  = macro_ctx.get("move_type", "?")
+    sm_bias    = macro_ctx.get("smart_money_bias", "?")
+    etf_sig    = macro_ctx.get("etf_signal", "?")
+    cb_sig     = macro_ctx.get("coinbase_signal", "?")
+    tt_div     = macro_ctx.get("divergence_signal", "?")
+    mp_price   = macro_ctx.get("max_pain_price", "?")
+    mp_bias    = macro_ctx.get("max_pain_bias", "?")
+    bd         = setup.get("score_breakdown") or {}
+    cal_boost  = bd.get("calibration", 0)
+    qblock     = bd.get("quality_block", "")
+    sim        = setup.get("sim") or {}
+    risk_usd   = sim.get("risk_usd", "?")
+    dir_emoji  = "📈" if direction == "LONG" else "📉"
     return (
         f"{dir_emoji} *SETUP: {direction} {tier}*\n"
         f"{'─'*25}\n"
