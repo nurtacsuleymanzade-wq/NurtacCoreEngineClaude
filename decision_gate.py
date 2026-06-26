@@ -286,6 +286,9 @@ def _compute_gate(ts: int, window_end_ts: int,
     else:
         setup_grade = "none"
 
+    # Yön belirsizse (neutral) trade edilemez → grade "none"a düşür
+    if dominant_direction == "neutral" and setup_grade != "none":
+        setup_grade = "none"
     if setup_grade == "none":
         final_direction = "neutral"
     else:
