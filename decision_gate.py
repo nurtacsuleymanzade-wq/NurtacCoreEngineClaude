@@ -328,6 +328,10 @@ def _compute_gate(ts: int, window_end_ts: int,
 
         if prob_action != "none" and isinstance(score_breakdown, dict):
             score_breakdown["probability_boost"] = prob_action
+        # Probability boost grade'i "none"dan yukarı çıkardıysa
+        # final_direction da güncellenmeli (daha önce "neutral" set edilmişti)
+        if setup_grade != "none" and final_direction == "neutral":
+            final_direction = dominant_direction
 
     gate_cal = _load_gate_calibration()
     if gate_cal:
