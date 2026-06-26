@@ -166,7 +166,8 @@ def _bl_mean_vol(baseline_1s: dict | None) -> float:
     return 0.0
 
 # ── State machine ─────────────────────────────────────────────────────────────
-TERMINAL_STATES = frozenset({"QUALIFIED", "INVALIDATED", "EXPIRED"})
+# QUALIFIED is observational, not terminal. Only invalidation/expiry stop tracking.
+TERMINAL_STATES = frozenset({"INVALIDATED", "EXPIRED"})
 
 class ObservedSetup:
     """Tracks observation state for one Layer-7 setup."""
@@ -442,7 +443,15 @@ class ObservedSetup:
                 self._transition(ts, "INVALIDATED", rejection,
                                  rejection, cur_price, obs_fh)
                 return False
-            if all(qual.values()):
+            # F0 ve session kritik — bunlar False ise gerçekten uyumsuz
+            hard_fail = (
+                not qual.get("F0_regime_compatible", True) or
+                not qual.get("F_session_ok", True)
+            )
+            if hard_fail:
+                pass  # INVALIDATED zaten yukarıda handle edildi
+            elif all(qual.values()):
+                # Tüm kapılar geçti → QUALIFIED → paper trade
                 self._emit_qualified(
                     ts, cur_price, poc, vah, val, prof_shape,
                     trend_1s_dir, trend_1m_dir, dom_scen_name,
@@ -450,6 +459,23 @@ class ObservedSetup:
                     flow_rec, absrp_rec, regime or {}, qual_fh, obs_fh,
                 )
                 return False
+            else:
+                # F kapıları geçemedi ama setup OBSERVED olarak kaydedilsin
+                # F gate truth table logla, setup ölmesin
+                failing = [k for k, v in qual.items() if not v]
+                self._obs_write(
+                    ts, "F_GATE_PARTIAL",
+                    "QUALIFYING", "QUALIFYING",
+                    cur_price,
+                    f"partial_pass failing={failing} "
+                    f"F1={qual.get('F1_delta_aligned')} "
+                    f"F2={qual.get('F2_structure_aligned')} "
+                    f"F3={qual.get('F3_location_valid')} "
+                    f"F4={qual.get('F4_scenario_aligned')} "
+                    f"F5={qual.get('F5_bias_aligned')}",
+                    obs_fh,
+                )
+                # Setup QUALIFYING'de kalır, bir sonraki bar'da tekrar değerlendirilir
 
         # ── 6. Update rolling state ───────────────────────────────────────────
         self.prev_location = cur_loc
