@@ -490,13 +490,23 @@ class ObservedSetup:
                              scen_confirmed: bool, obs_fh) -> bool:
         reason: str | None = None
 
+        # Pre-entry SL kontrolü kaldırıldı.
+        # SL yönetimi paper_trade_engine'in sorumluluğundadır.
+        # Observer sadece gözlemler; trade açılmadan SL invalide etmez.
         if self.sl_price > 0 and cur_price > 0:
-            if self.direction == "long" and cur_price < self.sl_price:
-                reason = f"close {cur_price:.2f} < sl {self.sl_price:.2f}"
-            elif self.direction == "short" and cur_price > self.sl_price:
-                reason = f"close {cur_price:.2f} > sl {self.sl_price:.2f}"
+            sl_breached = (
+                (self.direction == "long" and cur_price < self.sl_price) or
+                (self.direction == "short" and cur_price > self.sl_price)
+            )
+            if sl_breached:
+                print(
+                    f"[OBS] SL_NOTE {self.setup_id}: "
+                    f"pre-entry price={cur_price:.2f} sl={self.sl_price:.2f} "
+                    f"(gözlem devam ediyor, trade açılmadı)",
+                    flush=True,
+                )
 
-        if reason is None and scen_confirmed:
+        if scen_confirmed:
             if self.direction == "long" and dom_scen_dir == "bearish":
                 reason = "confirmed bearish scenario invalidates long setup"
             elif self.direction == "short" and dom_scen_dir == "bullish":
