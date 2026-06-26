@@ -13,6 +13,7 @@ Timer: Her 30 saniyede yeni detector eventleri tarar.
 
 import argparse
 import json
+import subprocess
 import time
 from collections import deque
 from pathlib import Path
@@ -174,6 +175,7 @@ class HypothesisTracker:
         became_setup: bool,
         became_qualified: bool,
         became_trade: bool,
+        context: dict | None = None,
     ) -> None:
         direction = _direction(label)
         if direction is None:
@@ -200,6 +202,7 @@ class HypothesisTracker:
             "min_price": entry_price,
             "time_to_mfe_s": 0,
             "time_to_mae_s": 0,
+            "entry_context": context or {},
         }
 
         self._total += 1
@@ -284,6 +287,7 @@ class HypothesisTracker:
                     "became_qualified": h["became_qualified"],
                     "became_trade": h["became_trade"],
                     "data_quality": h["data_quality"],
+                    "entry_context": h.get("entry_context", {}),
                 }
 
                 _append_jsonl(OUTPUT_FILE, row)
@@ -374,6 +378,76 @@ def _scan_new_detector_events(
         return [], cursor
 
 
+def _build_context_snapshot(ts_ms: int) -> dict:
+    """O anki piyasa bağlamını tek sözlükte topla."""
+    DATA = DATA_DIR
+
+    def _tail1(fname: str) -> dict:
+        try:
+            raw = subprocess.getoutput(f"tail -1 {DATA / fname} 2>/dev/null")
+            return json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return {}
+
+    s1s = _tail1("structure_1s.jsonl")
+    s1m = _tail1("structure_1m.jsonl")
+    ev = _tail1("evidence_stream.jsonl")
+    scen = _tail1("scenarios.jsonl")
+    vp = {}
+    try:
+        vp = json.loads((DATA / "volume_profile.json").read_text())
+    except Exception:
+        pass
+    zone = {}
+    try:
+        zone = json.loads((DATA / "zone_context.json").read_text())
+    except Exception:
+        pass
+    bias = _tail1("bias_context.jsonl")
+    reg = _tail1("regime_context.jsonl")
+
+    det_states = {}
+    for det in ["initiative_flow", "absorption", "sweep", "exhaustion", "iceberg", "trapped_trader"]:
+        r = _tail1(f"labels_{det}.jsonl")
+        det_states[det] = {
+            "label": r.get("label", "none"),
+            "direction": r.get("direction"),
+            "score": r.get("score", 0),
+        }
+
+    bos = s1s.get("bos") or {}
+    trend_1s = s1s.get("trend") or {}
+    trend_1m = s1m.get("trend") or {}
+    candle_dna = ev.get("candle_dna") or {}
+
+    return {
+        "snapshot_ts": ts_ms,
+        "micro_bos": bos.get("micro_bos"),
+        "macro_bos": bos.get("macro_bos"),
+        "trend_1s": trend_1s.get("direction", "?"),
+        "trend_1m": trend_1m.get("direction", "?"),
+        "choch": trend_1s.get("choch_confirmed", False),
+        "msb": trend_1s.get("msb"),
+        "ob_count": len(s1s.get("order_blocks") or []),
+        "fvg_count": len(s1s.get("fvg") or []),
+        "delta": candle_dna.get("delta", 0),
+        "cvd": ev.get("cvd", 0),
+        "long_score": ev.get("long_score", 0),
+        "short_score": ev.get("short_score", 0),
+        "score_gap": ev.get("score_gap", 0),
+        "dominant_side": ev.get("dominant_side", "?"),
+        "detectors": det_states,
+        "poc_price": vp.get("poc_price"),
+        "price_vs_poc": vp.get("price_vs_poc"),
+        "in_value_area": zone.get("in_value_area"),
+        "price_location": zone.get("price_location"),
+        "scenario": scen.get("dominant_scenario"),
+        "session": reg.get("session", "?"),
+        "regime": reg.get("trend_regime", "?"),
+        "dominant_bias": bias.get("dominant_bias", "?"),
+    }
+
+
 def _build_ts_index(path: Path, tail_n: int = 500) -> set[int]:
     import subprocess
 
@@ -415,6 +489,7 @@ def run_once(tracker: HypothesisTracker, price_buf: PriceBuffer, cursors: dict) 
         cursors[det_name] = new_cur
 
         for ev in events:
+            ctx = _build_context_snapshot(ev["ts"])
             tracker.admit(
                 detector=det_name,
                 label=ev["label"],
@@ -423,6 +498,7 @@ def run_once(tracker: HypothesisTracker, price_buf: PriceBuffer, cursors: dict) 
                 became_setup=ev["became_setup"],
                 became_qualified=ev["became_qualified"],
                 became_trade=ev["became_trade"],
+                context=ctx,
             )
 
     tracker.tick(price_buf)
@@ -474,6 +550,7 @@ def run_test() -> None:
         became_setup=False,
         became_qualified=False,
         became_trade=False,
+        context=_build_context_snapshot(old_ts),
     )
 
     for i in range(0, 930, 30):
