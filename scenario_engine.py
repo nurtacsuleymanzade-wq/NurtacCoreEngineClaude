@@ -1271,7 +1271,7 @@ async def run_live() -> None:
         asyncio.create_task(_tail_index(STRUCT_1S_FILE, ctx.s1s, "s1s"), name="sc-s1s"),
         asyncio.create_task(_tail_index(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="sc-s1m"),
         asyncio.create_task(_tail_index(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="sc-s5m"),
-        asyncio.create_task(_poll_json(VOL_1M_FILE, ctx.vp1m, "vp1m", 5.0), name="sc-vp1m"),
+        asyncio.create_task(_tail_index_json(VOL_1M_FILE, ctx.vp1m, 5.0), name="sc-vp1m"),
         asyncio.create_task(_tail_index(VOL_SES_FILE,  ctx.vp_s, "vpses"), name="sc-vpses"),
         asyncio.create_task(_tail_index(GATE_FILE,     ctx.gate, "gate"), name="sc-gate"),
         asyncio.create_task(_tail_index(LIQ_FILE,      ctx.liq, "liquidation"), name="sc-liq"),
