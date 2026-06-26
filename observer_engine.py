@@ -964,12 +964,15 @@ class SetupTracker:
         sid = setup.get("setup_id", "")
         if not sid or sid in self.seen_ids:
             return
-        # quality_block olan setup'ları observer'a alma
-        qb = (setup.get("score_breakdown") or {}).get("quality_block")
-        if qb:
+        # quality_block olan L2+ setup'ları blokla (L1_LOW geçebilir)
+        qb   = (setup.get("score_breakdown") or {}).get("quality_block")
+        tier = setup.get("quality_tier", "L1_LOW")
+        if qb and tier not in ("L1_LOW", "BELOW_MIN"):
             self.seen_ids.add(sid)  # tekrar denemesin
-            print(f"[OBS] SKIP quality_block setup {sid}: {qb}", flush=True)
+            print(f"[OBS] SKIP quality_block {tier} setup {sid}: {qb}", flush=True)
             return
+        if qb and tier == "L1_LOW":
+            print(f"[OBS] ALLOW quality_block L1 setup {sid} (downgraded, still tradeable)", flush=True)
         self.seen_ids.add(sid)
 
         # Enforce max concurrent setups
