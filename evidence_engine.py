@@ -1245,13 +1245,21 @@ def _check_active_ob_fvg(structure: dict | None, direction: str) -> tuple[int, i
     obs  = structure.get("order_blocks") or []
     fvgs = structure.get("fvg") or []
 
-    prefix_ob  = "bullish_ob"  if direction == "long" else "bearish_ob"
-    prefix_fvg = "bullish_fvg" if direction == "long" else "bearish_fvg"
+    active_obs = []
+    for ob in obs:
+        ob_t = ob.get("ob_type") or ob.get("type") or ""
+        is_short = direction == "short" and any(w in ob_t for w in ("bearish", "supply"))
+        is_long = direction == "long" and any(w in ob_t for w in ("bullish", "demand"))
+        if (is_short or is_long) and ob.get("status") == "active":
+            active_obs.append(ob)
 
-    active_obs = [ob for ob in obs
-                  if ob.get("ob_type") == prefix_ob and ob.get("status") == "active"]
-    active_fvgs = [f for f in fvgs
-                   if f.get("fvg_type") == prefix_fvg and f.get("status") == "active"]
+    active_fvgs = []
+    for fvg in fvgs:
+        fvg_t = fvg.get("fvg_type") or fvg.get("type") or ""
+        is_short = direction == "short" and "bearish" in fvg_t
+        is_long = direction == "long" and "bullish" in fvg_t
+        if (is_short or is_long) and fvg.get("status") == "active":
+            active_fvgs.append(fvg)
     return len(active_obs), len(active_fvgs), active_obs
 
 def _refine_sl(sl_price: float, direction: str, active_obs: list[dict], atr: float) -> float:
