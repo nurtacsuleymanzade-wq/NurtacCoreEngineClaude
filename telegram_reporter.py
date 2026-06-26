@@ -355,3 +355,100 @@ if __name__ == "__main__":
 
     if args.mode == "live":
         asyncio.run(main())
+
+
+def format_analyst_report() -> str:
+    """
+    Günlük analist raporu oluştur.
+    READ: data/multitf_outlook.json, data/probability_surface.json,
+          data/macro_context.json, data/max_pain.json, data/bias_context.jsonl
+    WRITE: Telegram mesaj string (döndürür, göndermez)
+    """
+    import subprocess, json, time
+    from pathlib import Path
+
+    DATA = Path("data")
+
+    def _read(fname):
+        try:
+            return json.loads((DATA / fname).read_text())
+        except Exception:
+            return {}
+
+    def _tail1(fname):
+        try:
+            r = subprocess.getoutput(f"tail -1 {DATA/fname} 2>/dev/null")
+            return json.loads(r) if r.strip() else {}
+        except Exception:
+            return {}
+
+    outlook = _read("multitf_outlook.json")
+    ps = _read("probability_surface.json")
+    mc = _read("macro_context.json")
+    mp = _read("max_pain.json")
+    bias = _tail1("bias_context.jsonl")
+
+    price = float(outlook.get("current_price") or bias.get("current_price") or 0)
+    now = time.strftime("%d %B %H:%M UTC", time.gmtime())
+    regime = outlook.get("regime", "?")
+    session = outlook.get("session", "?")
+    outlooks = outlook.get("outlooks", {})
+    levels = outlook.get("key_levels", {})
+
+    def _ol(h: str) -> str:
+        o = outlooks.get(h, {})
+        b = o.get("bias", "?")
+        conf = o.get("confidence", 0)
+        agrees = ", ".join(o.get("signals_agree", [])[:2])
+        em = "📉" if b == "bearish" else "📈" if b == "bullish" else "↔️"
+        line = f"{em} {h} → {b.capitalize()} (%{conf*100:.0f})"
+        if agrees:
+            line += f" — {agrees}"
+        return line
+
+    best = (ps.get("best_combinations") or [{}])[0]
+    best_str = (
+        f"{best.get('detector','?')} → {best.get('horizon','?')} "
+        f"WR: %{best.get('wr',0)*100:.0f} "
+        f"(N={best.get('n',0)}, Wilson: {best.get('wilson_lower',0):.2f})"
+    ) if best else "Veri yetersiz"
+
+    scalp_ok = ", ".join(ps.get("scalp_recommended", [])) or "Belirsiz"
+    swing_no = ", ".join(ps.get("swing_not_recommended", [])) or "Yok"
+    liq_long = [f"${p:,.0f}" for p in (levels.get("liq_long_clusters") or [])[:3]]
+    liq_short = [f"${p:,.0f}" for p in (levels.get("liq_short_clusters") or [])[:3]]
+    mp_price = levels.get("max_pain") or mp.get("max_pain_price", "?")
+    move_type = mc.get("move_type", "?")
+    reliability = mc.get("signal_reliability", "?")
+
+    return (
+        f"🧠 NURTAC ANALİST RAPORU\n"
+        f"{'━'*24}\n"
+        f"📅 {now} | BTC: ${price:,.0f}\n\n"
+        f"📊 DURUM: {regime} | {session}\n"
+        f"Makro: {move_type} ({reliability})\n\n"
+        f"🔮 ÖNGÖRÜ\n"
+        + "\n".join(_ol(h) for h in ["1H", "4H", "1D"] if h in outlooks)
+        + f"\n\n⚡ EN GÜÇLÜ SİNYAL\n{best_str}\n\n"
+        f"💧 KRİTİK SEVİYELER\n"
+        f"Liq (Long): {liq_long}\n"
+        f"Liq (Short): {liq_short}\n"
+        f"Max Pain: ${mp_price}\n\n"
+        f"📈 EDGE DURUMU\n"
+        f"Scalp önerilen: {scalp_ok}\n"
+        f"Swing önerilmeyen: {swing_no}\n"
+        f"{'━'*24}"
+    )
+
+
+def send_analyst_report() -> bool:
+    """
+    format_analyst_report() çağırır ve Telegram'a gönderir.
+    Mevcut _send_telegram fonksiyonunu kullanır.
+    """
+    try:
+        msg = format_analyst_report()
+        return _send_telegram(msg, parse_mode="HTML")
+    except Exception as e:
+        print(f"[TG] Analyst report error: {e}", flush=True)
+        return False
