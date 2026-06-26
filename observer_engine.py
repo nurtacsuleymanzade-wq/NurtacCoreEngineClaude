@@ -44,6 +44,8 @@ SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
 STRUCT_1M_FILE = DATA_DIR / "structure_1m.jsonl"
 VOL_1M_FILE    = DATA_DIR / "volume_profile_1m.jsonl"
+ZONE_CTX_FILE  = DATA_DIR / "zone_context.json"
+VP_FILE        = DATA_DIR / "volume_profile.json"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
 BIAS_FILE      = DATA_DIR / "bias_context.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
@@ -322,12 +324,32 @@ class ObservedSetup:
         delta     = _sf(cdna.get("delta"), 0.0)
         total_vol = _sf(cdna.get("total_volume"), 0.0)
 
+        # zone_context.json (new format) → cur_loc
+        _zone = {}
+        try:
+            if ZONE_CTX_FILE.exists():
+                _zone = json.loads(ZONE_CTX_FILE.read_text())
+        except Exception:
+            pass
+        # volume_profile.json (new format) → poc/vah/val
+        _vp = {}
+        try:
+            if VP_FILE.exists():
+                _vp = json.loads(VP_FILE.read_text())
+        except Exception:
+            pass
+        # Fallback: eski vp1m formatı
         vp_loc  = (vp1m or {}).get("location") or {}
         vp_prof = (vp1m or {}).get("profile")  or {}
-        cur_loc = (vp_loc.get("location") or vp_loc).get("position")
-        poc     = _sf(vp_prof.get("poc"), 0.0)
-        vah     = _sf(vp_prof.get("vah"), 0.0)
-        val     = _sf(vp_prof.get("val"), 0.0)
+        # cur_loc: zone_context öncelikli
+        cur_loc = (
+            _zone.get("price_location")
+            or (vp_loc.get("location") or vp_loc).get("position")
+        )
+        # poc/vah/val: volume_profile.json öncelikli
+        poc     = _sf(_vp.get("poc_price") or vp_prof.get("poc"), 0.0)
+        vah     = _sf(_vp.get("vah")       or vp_prof.get("vah"), 0.0)
+        val     = _sf(_vp.get("val")       or vp_prof.get("val"), 0.0)
         prof_shape = vp_prof.get("profile_shape")
 
         bos_1s    = (s1s or {}).get("bos") or {}
@@ -473,13 +495,15 @@ class ObservedSetup:
         # ── RECLAIM ───────────────────────────────────────────────────────────
         if self.prev_location and cur_loc and self.prev_location != cur_loc:
             if self.direction == "long":
-                if (self.prev_location in ("below_value", "at_val") and
-                        cur_loc in ("inside_value", "above_value", "at_vah", "at_poc")):
+                if (self.prev_location in ("below_value", "at_val", "demand") and
+                        cur_loc in ("inside_value", "above_value", "at_vah", "at_poc",
+                                    "fvg", "neutral", "above_poc")):
                     events.append(("RECLAIM_VALUE",
                                    f"location {self.prev_location}→{cur_loc}"))
             else:
-                if (self.prev_location in ("above_value", "at_vah") and
-                        cur_loc in ("inside_value", "below_value", "at_val", "at_poc")):
+                if (self.prev_location in ("above_value", "at_vah", "supply") and
+                        cur_loc in ("inside_value", "below_value", "at_val", "at_poc",
+                                    "fvg", "neutral", "below_poc")):
                     events.append(("RECLAIM_VALUE",
                                    f"location {self.prev_location}→{cur_loc}"))
 
