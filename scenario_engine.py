@@ -1287,8 +1287,7 @@ async def run_live() -> None:
             _tail_index(path, ctx.dets[det_name], det_name),
             name=f"sc-{det_name}",
         ))
-    try:
-        # Pre-load volume_profile.json into vp1m cache
+    # Pre-load volume_profile.json into vp1m cache
     try:
         import json as _json
         if VOL_1M_FILE.exists():
