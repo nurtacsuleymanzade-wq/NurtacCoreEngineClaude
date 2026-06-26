@@ -28,6 +28,10 @@ DATA_DIR         = Path("data")
 HALT_FILE        = DATA_DIR / "SYSTEM_HALT"
 OUTPUT_FILE      = DATA_DIR / "decision_gate_output.jsonl"
 CALIBRATION_VIEW_FILE = DATA_DIR / "decision_gate_calibration_view.json"
+PROB_SURFACE_FILE = DATA_DIR / "probability_surface.json"
+PROB_MIN_N        = 30
+PROB_BOOST_WL     = 0.60   # wilson_lower >= bu → grade +1
+PROB_PENALTY_WL   = 0.40   # wilson_lower <= bu → grade -1
 FULL_PRINT       = os.environ.get("FULL_PRINT", "false").lower() == "true"
 POLL_INTERVAL    = 0.05
 FILE_WAIT_SLEEP  = 2.0
@@ -121,6 +125,18 @@ def _load_gate_calibration() -> dict:
         pass
     _gate_calibration_cache = {}
     return _gate_calibration_cache
+
+
+def _load_prob_surface() -> dict:
+    """Probability surface opsiyonel yükle. Yoksa boş dict."""
+    try:
+        if PROB_SURFACE_FILE.exists():
+            data = json.loads(PROB_SURFACE_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
 
 
 def _read_last_n_lines(path: Path, n: int = 200) -> tuple[list[dict], int]:
@@ -274,6 +290,44 @@ def _compute_gate(ts: int, window_end_ts: int,
         final_direction = "neutral"
     else:
         final_direction = dominant_direction
+
+    # Probability surface entegrasyonu
+    prob = _load_prob_surface()
+    if prob:
+        dets = prob.get("detectors") or {}
+        grade_map = {"A": 2, "B": 1, "C": 0}
+        reverse_map = {2: "A", 1: "B", 0: "C"}
+        current_g = grade_map.get(setup_grade, 1)
+        prob_action = "none"
+
+        # Dominant detector için probability bak
+        # dominant_detector: en yüksek katkı yapan detector (mevcut breakdown'dan)
+        for det_name, det_horizons in dets.items():
+            short_h = det_horizons.get("30s") or det_horizons.get("1m") or {}
+            if not short_h.get("reliable"):
+                continue
+            wl = float(short_h.get("wilson_lower") or 0)
+            n = int(short_h.get("n") or 0)
+            if n < PROB_MIN_N:
+                continue
+
+            if wl >= PROB_BOOST_WL:
+                new_g = min(2, current_g + 1)
+                if new_g != current_g:
+                    setup_grade = reverse_map[new_g]
+                    prob_action = f"boost_{det_name}_wl={wl:.2f}"
+                    current_g = new_g
+                break
+            elif wl <= PROB_PENALTY_WL:
+                new_g = max(0, current_g - 1)
+                if new_g != current_g:
+                    setup_grade = reverse_map[new_g]
+                    prob_action = f"penalty_{det_name}_wl={wl:.2f}"
+                    current_g = new_g
+                break
+
+        if prob_action != "none" and isinstance(score_breakdown, dict):
+            score_breakdown["probability_boost"] = prob_action
 
     gate_cal = _load_gate_calibration()
     if gate_cal:
