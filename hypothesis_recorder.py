@@ -106,7 +106,13 @@ def _data_quality(detector: str, label: str, price: float) -> str:
 class PriceBuffer:
     def __init__(self):
         self._buf: deque[tuple[int, float, float, float]] = deque(maxlen=MAX_PRICE_BUFFER)
-        self._cursor: int = 0
+        # Dosya sonundan başla — eski veriyi okumayı atla
+        try:
+            size = PRICE_FILE.stat().st_size if PRICE_FILE.exists() else 0
+            # Son ~500 satır için geriye git (ortalama satır 200 byte)
+            self._cursor: int = max(0, size - 100_000)
+        except Exception:
+            self._cursor: int = 0
 
     def update(self) -> None:
         if not PRICE_FILE.exists():
