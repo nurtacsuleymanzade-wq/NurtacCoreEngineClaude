@@ -1128,7 +1128,7 @@ def run_batch() -> None:
             for s in setups_by_ts.get(ts, []):
                 tracker.admit(s, ts, obs_fh)
 
-            s1s  = s1s_idx.get(ts)
+            s1s  = _latest_at_or_before(s1s_idx, ts)
             s1m  = _latest_at_or_before(s1m_idx, ts)
             vp1m = _latest_at_or_before(vp1m_idx, ts)
             gate = gate_idx.get(ts)
