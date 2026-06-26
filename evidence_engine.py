@@ -1135,6 +1135,7 @@ def compute_evidence(
         "window_start_ts": ts,
         "window_end_ts":   wte,
         "close_price":     _sf(((primary.get("candle_dna") or {}).get("close") or {}).get("price"), 0.0),
+        "candle_dna":      primary.get("candle_dna"),
         "long_score":      round(long_score,  4),
         "short_score":     round(short_score, 4),
         "dominant_side":   dominant,
