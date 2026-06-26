@@ -1,0 +1,18 @@
+[Unit]
+Description=NurtacCoreEngineClaude Trade Brain Engine
+After=nurtac-supervisor.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/NurtacCoreEngineClaude
+ExecStartPre=/bin/sleep 70
+ExecStart=/root/NurtacCoreEngineClaude/.venv/bin/python3 trade_brain_engine.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+MemoryMax=300M
+MemorySwapMax=150M
+
+[Install]
+WantedBy=multi-user.target
