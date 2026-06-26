@@ -411,6 +411,7 @@ def run_once(tracker: HypothesisTracker, price_buf: PriceBuffer, cursors: dict) 
                 became_setup=ev["became_setup"],
                 became_qualified=ev["became_qualified"],
                 became_trade=ev["became_trade"],
+                record=ev.get("record"),
             )
 
     tracker.tick(price_buf)
