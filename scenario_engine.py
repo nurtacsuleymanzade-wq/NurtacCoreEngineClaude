@@ -1297,7 +1297,8 @@ async def run_live() -> None:
     except Exception:
         pass
 
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         print("[SCEN] Tasks cancelled", flush=True)
 
