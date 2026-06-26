@@ -74,6 +74,7 @@ def analyze_market() -> dict:
     price_loc = zone.get("price_location", "neutral")
     dom_scenario = scen.get("dominant_scenario")
     dom_scen_dir = scen.get("dominant_direction", "neutral")
+    active_scens = scen.get("active_scenarios") or []
     dom_bias = bias.get("dominant_bias", "neutral")
     cascade_risk = liq.get("cascade_risk", "none")
     long_score = _sf(ev.get("long_score"))
@@ -116,17 +117,18 @@ def analyze_market() -> dict:
     else:
         scores["Q3_liquidity"] = (0.5, 0.5, "Dengeli likidite")
 
-    acc_zone = vp.get("acceptance_zone", "unknown")
+    acc_zone_raw = vp.get("acceptance_zone", {})
+    price_vs_poc = vp.get("price_vs_poc", "at")
     if micro_bos == "bullish":
-        scores["Q4_acceptance"] = (0.75, 0.25, "BOS bullish — acceptance yukarı")
+        scores["Q4_acceptance"] = (0.75, 0.25, "BOS bullish — acceptance yukari")
     elif micro_bos == "bearish":
-        scores["Q4_acceptance"] = (0.25, 0.75, "BOS bearish — acceptance aşağı")
-    elif acc_zone == "above_value":
-        scores["Q4_acceptance"] = (0.65, 0.35, "Above value area — acceptance")
-    elif acc_zone == "below_value":
-        scores["Q4_acceptance"] = (0.35, 0.65, "Below value area — rejection down")
+        scores["Q4_acceptance"] = (0.25, 0.75, "BOS bearish — acceptance asagi")
+    elif price_vs_poc == "above":
+        scores["Q4_acceptance"] = (0.65, 0.35, "Above POC — acceptance")
+    elif price_vs_poc == "below":
+        scores["Q4_acceptance"] = (0.35, 0.65, "Below POC — rejection")
     else:
-        scores["Q4_acceptance"] = (0.5, 0.5, f"acc_zone={acc_zone}")
+        scores["Q4_acceptance"] = (0.5, 0.5, f"At POC — neutral {acc_zone_raw}")
 
     init_dir = init_r.get("direction")
     if init_dir == "buy_initiative":
@@ -181,12 +183,26 @@ def analyze_market() -> dict:
         "LIQUIDITY_SWEEP": (0.35, 0.65),
         "RANGE_CONTINUATION": (0.5, 0.5),
     }
+    if not dom_scenario and active_scens:
+        best = max(
+            active_scens,
+            key=lambda x: x.get("score", 0) if isinstance(x, dict) else 0,
+        )
+        dom_scenario = best.get("name") if isinstance(best, dict) else str(best)
+    if dom_scen_dir == "bullish":
+        scenario_bias = (0.65, 0.35)
+    elif dom_scen_dir == "bearish":
+        scenario_bias = (0.35, 0.65)
+    else:
+        scenario_bias = (0.5, 0.5)
     if dom_scenario in scenario_long_map:
         scores["Q9_market_intent"] = (*scenario_long_map[dom_scenario], f"Senaryo: {dom_scenario}")
     elif dom_scenario in scenario_short_map:
         scores["Q9_market_intent"] = (*scenario_short_map[dom_scenario], f"Senaryo: {dom_scenario}")
+    elif dom_scen_dir != "neutral":
+        scores["Q9_market_intent"] = (*scenario_bias, f"Yon: {dom_scen_dir} (senaryo yok)")
     else:
-        scores["Q9_market_intent"] = (0.5, 0.5, f"Senaryo: {dom_scenario or 'yok'}")
+        scores["Q9_market_intent"] = (0.5, 0.5, "Senaryo ve yon yok")
 
     total_long = sum(v[0] for v in scores.values()) / len(scores)
     total_short = sum(v[1] for v in scores.values()) / len(scores)
