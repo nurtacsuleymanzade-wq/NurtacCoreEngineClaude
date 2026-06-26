@@ -853,13 +853,10 @@ def _trim_memory() -> None:
     try:
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             f.writelines(keep)
-        try:
             try:
-            os.fsync(f.fileno())
-        except (OSError, ValueError):
-            pass  # dosya zaten kapanmış olabilir
-        except (OSError, ValueError):
-            pass  # dosya zaten kapanmış olabilir
+                os.fsync(f.fileno())
+            except (OSError, ValueError):
+                pass
     except OSError:
         pass
 
