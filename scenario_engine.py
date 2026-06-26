@@ -915,7 +915,13 @@ def run_batch() -> None:
     s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=150))
     s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=60))
     s5m_idx      = _build_index(_read_last_n_jsonl(STRUCT_5M_FILE, maxlen=60))
-    vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=60))
+    # volume_profile.json tek JSON dosyası — JSONL değil
+    try:
+        _vp_raw = json.loads(VOL_1M_FILE.read_text()) if VOL_1M_FILE.exists() else {}
+        _vp_ts  = _vp_raw.get("ts") or int(__import__("time").time() * 1000)
+        vp1m_idx = {_vp_ts: _vp_raw}
+    except Exception:
+        vp1m_idx = {}
     vp_ses_idx   = _build_index(_read_last_n_jsonl(VOL_SES_FILE, maxlen=60))
     gate_idx     = _build_index(_read_last_n_jsonl(GATE_FILE, maxlen=60))
     det_idxs     = {d: _build_index(_read_last_n_jsonl(p, maxlen=60)) for d, p in DETECTOR_FILES.items()}
@@ -1265,7 +1271,7 @@ async def run_live() -> None:
         asyncio.create_task(_tail_index(STRUCT_1S_FILE, ctx.s1s, "s1s"), name="sc-s1s"),
         asyncio.create_task(_tail_index(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="sc-s1m"),
         asyncio.create_task(_tail_index(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="sc-s5m"),
-        asyncio.create_task(_tail_index(VOL_1M_FILE,   ctx.vp1m, "vp1m"), name="sc-vp1m"),
+        asyncio.create_task(_poll_json(VOL_1M_FILE, ctx.vp1m, "vp1m", 5.0), name="sc-vp1m"),
         asyncio.create_task(_tail_index(VOL_SES_FILE,  ctx.vp_s, "vpses"), name="sc-vpses"),
         asyncio.create_task(_tail_index(GATE_FILE,     ctx.gate, "gate"), name="sc-gate"),
         asyncio.create_task(_tail_index(LIQ_FILE,      ctx.liq, "liquidation"), name="sc-liq"),
