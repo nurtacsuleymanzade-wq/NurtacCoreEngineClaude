@@ -341,15 +341,21 @@ def _scan_new_detector_events(
                 try:
                     d = json.loads(line)
                     ts = int(d.get("ts") or d.get("window_start_ts") or 0)
-                    label = str(d.get("label", ""))
-                    if ts > 0 and label and label not in ("none", ""):
+                    label     = str(d.get("label", "") or "")
+                    direction = str(d.get("direction", "") or "")
+                    # label alani "initiative_candidate" gibi generic
+                    # direction alani "sell_initiative" gibi BULLISH/BEARISH'te olan deger
+                    # Hipotez icin direction'i kullan, label fallback
+                    track_label = direction if direction and direction != "None" else label
+                    if ts > 0 and track_label and track_label not in ("none", "", "None"):
                         events.append(
                             {
-                                "ts": ts,
-                                "label": label,
-                                "became_setup": ts in setups_index,
+                                "ts":               ts,
+                                "label":            track_label,
+                                "orig_label":       label,
+                                "became_setup":     ts in setups_index,
                                 "became_qualified": ts in qualified_index,
-                                "became_trade": ts in trades_index,
+                                "became_trade":     ts in trades_index,
                             }
                         )
                 except (json.JSONDecodeError, ValueError, TypeError):
