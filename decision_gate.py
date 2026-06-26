@@ -411,6 +411,11 @@ def _compute_gate(ts: int, window_end_ts: int,
             "cvd_direction": None, "volume_percentile": None, "context_alignment": "unknown",
         }
 
+    # FINAL GUARD: direction neutral iken asla grade emit etme
+    # (probability boost veya calibration sonrası da geçerli)
+    if final_direction == "neutral" or dominant_direction == "neutral":
+        setup_grade     = "none"
+        final_direction = "neutral"
     return {
         "gate": "decision_gate",
         "symbol": SYMBOL,
