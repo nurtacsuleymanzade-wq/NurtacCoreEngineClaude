@@ -64,6 +64,8 @@ DEVELOPING_TIMEOUT_MS = 120_000   # 2 min
 VOLUME_BOOST          = 1.3
 ATR_TOUCH_FACTOR      = 0.1       # ATR * 0.1 = touch range for HOLD
 LIVE_CACHE_MAX        = 120
+MIN_BRAIN_SOFT_CONFIRMATIONS = 2
+BRAIN_MODE = "paper_learning_v0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -463,32 +465,31 @@ class ObservedSetup:
             )
             if hard_fail:
                 pass  # INVALIDATED zaten yukarıda handle edildi
-            elif all(qual.values()):
-                # Tüm kapılar geçti → QUALIFIED → paper trade
-                self._emit_qualified(
-                    ts, cur_price, poc, vah, val, prof_shape,
-                    trend_1s_dir, trend_1m_dir, dom_scen_name,
-                    gate_grade, dom_bias, qual,
-                    flow_rec, absrp_rec, regime or {}, qual_fh, obs_fh,
-                )
-                return False
             else:
-                # F kapıları geçemedi ama setup OBSERVED olarak kaydedilsin
-                # F gate truth table logla, setup ölmesin
-                failing = [k for k, v in qual.items() if not v]
-                self._obs_write(
-                    ts, "F_GATE_PARTIAL",
-                    "QUALIFYING", "QUALIFYING",
-                    cur_price,
-                    f"partial_pass failing={failing} "
-                    f"F1={qual.get('F1_delta_aligned')} "
-                    f"F2={qual.get('F2_structure_aligned')} "
-                    f"F3={qual.get('F3_location_valid')} "
-                    f"F4={qual.get('F4_scenario_aligned')} "
-                    f"F5={qual.get('F5_bias_aligned')}",
-                    obs_fh,
-                )
-                # Setup QUALIFYING'de kalır, bir sonraki bar'da tekrar değerlendirilir
+                brain = self._build_brain_decision(qual)
+                if brain["decision"] == "APPROVED":
+                    # Minimal paper-trade v0: allows observation-backed paper trades for learning; not final live trading threshold.
+                    self._emit_qualified(
+                        ts, cur_price, poc, vah, val, prof_shape,
+                        trend_1s_dir, trend_1m_dir, dom_scen_name,
+                        gate_grade, dom_bias, qual,
+                        flow_rec, absrp_rec, regime or {}, qual_fh, obs_fh,
+                        brain=brain,
+                    )
+                    return False
+                else:
+                    self._obs_write(
+                        ts, "F_GATE_PARTIAL",
+                        "QUALIFYING", "QUALIFYING",
+                        cur_price,
+                        f"BRAIN_WAIT reason={brain.get('reason')} "
+                        f"hard_gates_ok={brain.get('hard_gates_ok')} "
+                        f"soft_confirmations={brain.get('soft_confirmations')}/"
+                        f"{brain.get('required_soft_confirmations')} "
+                        f"failed_soft={brain.get('failed_soft_gates', [])}",
+                        obs_fh,
+                    )
+                    # Setup QUALIFYING'de kalır, bir sonraki bar'da tekrar değerlendirilir
 
         # ── 6. Update rolling state ───────────────────────────────────────────
         self.prev_location = cur_loc
@@ -744,7 +745,7 @@ class ObservedSetup:
             not compatible or any(c in setup_type_str for c in compatible)
         )
         session = regime.get("session", "UNKNOWN") if regime else "UNKNOWN"
-        bad_sessions = {"OFF_HOURS"}  # ASIA kaldirildi - 00:00-08:00 UTC artik acik
+        bad_sessions = set()  # BTC 7/24 - tüm session'lar açık
         f_session = session not in bad_sessions or self.setup_type in ["REVERSAL", "RECLAIM"]
         f_timing = self.entry_timing not in ("extended",)
         if self.direction == "long":
@@ -791,13 +792,57 @@ class ObservedSetup:
             "F_timing_ok":          f_timing,
         }
 
+    def _build_brain_decision(self, qual: dict) -> dict:
+        soft_keys = [
+            "F1_delta_aligned",
+            "F2_structure_aligned",
+            "F3_location_valid",
+            "F4_scenario_aligned",
+            "F5_bias_aligned",
+        ]
+        hard_gates_ok = all([
+            bool(qual.get("F0_regime_compatible", False)),
+            bool(qual.get("F_session_ok", False)),
+            bool(qual.get("F_timing_ok", False)),
+        ])
+        passed_soft_gates = [k for k in soft_keys if qual.get(k, False)]
+        failed_soft_gates = [k for k in soft_keys if not qual.get(k, False)]
+        soft_confirmations = len(passed_soft_gates)
+        approved = hard_gates_ok and soft_confirmations >= MIN_BRAIN_SOFT_CONFIRMATIONS
+        if approved:
+            decision = "APPROVED"
+            reason = (
+                f"approved hard_gates_ok={hard_gates_ok} "
+                f"soft_confirmations={soft_confirmations}/"
+                f"{MIN_BRAIN_SOFT_CONFIRMATIONS} "
+                f"passed_soft={passed_soft_gates}"
+            )
+        else:
+            decision = "WAIT"
+            reason = (
+                f"wait hard_gates_ok={hard_gates_ok} "
+                f"soft_confirmations={soft_confirmations}/"
+                f"{MIN_BRAIN_SOFT_CONFIRMATIONS} "
+                f"failed_soft={failed_soft_gates}"
+            )
+        return {
+            "decision": decision,
+            "hard_gates_ok": hard_gates_ok,
+            "soft_confirmations": soft_confirmations,
+            "required_soft_confirmations": MIN_BRAIN_SOFT_CONFIRMATIONS,
+            "passed_soft_gates": passed_soft_gates,
+            "failed_soft_gates": failed_soft_gates,
+            "reason": reason,
+            "brain_mode": BRAIN_MODE,
+        }
+
     # ── Emit qualified setup ──────────────────────────────────────────────────
     def _emit_qualified(
         self, ts: int, cur_price: float, poc: float, vah: float, val: float,
         prof_shape: str | None, trend_1s: str, trend_1m: str,
         dom_scen_name: str | None, gate_grade: str | None, dom_bias: str,
         qual: dict[str, bool], flow_rec: dict, absrp_rec: dict,
-        regime: dict, qual_fh, obs_fh,
+        regime: dict, qual_fh, obs_fh, brain: dict | None = None,
     ) -> None:
         time_to_qualify = max(0, (ts - self.opened_ts) // 1000)
         qsid = f"QS_{self.setup_id}"
@@ -882,6 +927,13 @@ class ObservedSetup:
             },
             "transition_history":      self.transition_history,
             "qualification_criteria":  qual,
+            "brain_decision":          (brain or {}).get("decision", "APPROVED"),
+            "brain_soft_confirmations": (brain or {}).get("soft_confirmations", 0),
+            "brain_required_min_confirmations": (brain or {}).get(
+                "required_soft_confirmations", MIN_BRAIN_SOFT_CONFIRMATIONS
+            ),
+            "brain_reason":            (brain or {}).get("reason", ""),
+            "brain_mode":              (brain or {}).get("brain_mode", BRAIN_MODE),
             "context_at_qualification": context,
             "market_questions": {
                 "location":     f"price at {ep:.2f} — {loc_desc}",
@@ -923,6 +975,10 @@ class ObservedSetup:
             "entry_timing": self.entry_timing,
             "volatility_at_qualification": regime.get("volatility_class"),
             "details": "all regime and F1-F5 criteria met",
+            "brain_decision": (brain or {}).get("decision", "APPROVED"),
+            "brain_reason": (brain or {}).get("reason", "all hard gates met and soft confirmations satisfied"),
+            "soft_confirmations": (brain or {}).get("soft_confirmations", 0),
+            "hard_gates_ok": (brain or {}).get("hard_gates_ok", True),
             "f_gates": {
                 "f1_bos": True,
                 "f2_volume": True,

@@ -221,8 +221,7 @@ def build_context(ts_ms: int) -> dict:
     block_reason = None
     if volatility == "SPIKE":
         block_reason = "VOLATILE"
-    elif session == "OFF_HOURS":
-        block_reason = "OFF_HOURS"
+    # OFF_HOURS removed — BTC trades 24/7, no session block
     trade_allowed = block_reason is None
     return {
         "engine": "regime_engine",
