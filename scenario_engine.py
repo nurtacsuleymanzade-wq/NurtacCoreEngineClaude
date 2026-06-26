@@ -1271,7 +1271,7 @@ async def run_live() -> None:
         asyncio.create_task(_tail_index(STRUCT_1S_FILE, ctx.s1s, "s1s"), name="sc-s1s"),
         asyncio.create_task(_tail_index(STRUCT_1M_FILE, ctx.s1m, "s1m"), name="sc-s1m"),
         asyncio.create_task(_tail_index(STRUCT_5M_FILE, ctx.s5m, "s5m"), name="sc-s5m"),
-        asyncio.create_task(_tail_index_json(VOL_1M_FILE, ctx.vp1m, 5.0), name="sc-vp1m"),
+        # vp1m: loaded via _load_vp1m background task
         asyncio.create_task(_tail_index(VOL_SES_FILE,  ctx.vp_s, "vpses"), name="sc-vpses"),
         asyncio.create_task(_tail_index(GATE_FILE,     ctx.gate, "gate"), name="sc-gate"),
         asyncio.create_task(_tail_index(LIQ_FILE,      ctx.liq, "liquidation"), name="sc-liq"),
@@ -1288,7 +1288,17 @@ async def run_live() -> None:
             name=f"sc-{det_name}",
         ))
     try:
-        await asyncio.gather(*tasks)
+        # Pre-load volume_profile.json into vp1m cache
+    try:
+        import json as _json
+        if VOL_1M_FILE.exists():
+            _vp = _json.loads(VOL_1M_FILE.read_text())
+            _vpts = _vp.get("ts") or int(__import__("time").time() * 1000)
+            ctx.vp1m[_vpts] = _vp
+    except Exception:
+        pass
+
+    await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         print("[SCEN] Tasks cancelled", flush=True)
 
