@@ -16,6 +16,7 @@ ENGINES = [
     ("historical_baseline",     "historical_baseline_engine.py", 90),
     ("detector_engine",         "detector_engine.py",         30),
     ("evidence_engine",         "evidence_engine.py",         45),
+    ("trade_brain_engine",      "trade_brain_engine.py",      50),
     ("observer_engine",         "observer_engine.py --mode live", 60),
 ]
 

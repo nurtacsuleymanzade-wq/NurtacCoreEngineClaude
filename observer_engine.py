@@ -39,6 +39,7 @@ QUALIFIED_FILE    = DATA_DIR / "qualified_setups.jsonl"
 PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 SETUPS_FILE    = DATA_DIR / "setups.jsonl"
 LIQ_SETUPS_FILE = DATA_DIR / "liquidation_setups.jsonl"
+TRADE_BRAIN_SETUPS_FILE = DATA_DIR / "trade_brain_setups.jsonl"
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 
 STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
@@ -1426,6 +1427,9 @@ async def run_live() -> None:
     ))
     tasks.append(asyncio.create_task(
         _tail_setup_file(LIQ_SETUPS_FILE, 50), name="obs-liq-setups",
+    ))
+    tasks.append(asyncio.create_task(
+        _tail_setup_file(TRADE_BRAIN_SETUPS_FILE, 0), name="ob-trade-brain-setups",
     ))
 
     try:
