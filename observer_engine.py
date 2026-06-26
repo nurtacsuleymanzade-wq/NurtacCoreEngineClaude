@@ -680,7 +680,9 @@ class ObservedSetup:
             trend_1m_up = ((s1m or {}).get("trend", {}).get("direction") == "uptrend")
             f1 = (delta > 0) or (macro_bullish and trend_1m_up)
             f2 = (trend_1s == "uptrend" or micro_bos == "bullish")
-            f3 = cur_loc in ("inside_value", "above_value", "at_vah", "at_poc")
+            # zone_engine: demand/supply/fvg/neutral/above_poc  
+            f3 = cur_loc in ("demand", "fvg", "neutral", "at_poc", "above_poc",
+                             "inside_value", "above_value", "at_vah")  # her iki format
             f4 = dom_scen_dir in ("bullish", "neutral")
             f5 = dom_bias in ("long", "neutral")
         else:
@@ -689,7 +691,10 @@ class ObservedSetup:
             trend_1m_down = ((s1m or {}).get("trend", {}).get("direction") == "downtrend")
             f1 = (delta < 0) or (macro_bearish and trend_1m_down)
             f2 = (trend_1s == "downtrend" or micro_bos == "bearish")
-            f3 = cur_loc in ("inside_value", "below_value", "at_val", "at_poc")
+            # zone_engine: demand/supply/fvg/neutral/above_poc
+            # Eski: inside_value/below_value/at_val/at_poc (artık kullanılmıyor)
+            f3 = cur_loc in ("demand", "fvg", "neutral", "at_poc", "below_poc",
+                             "inside_value", "below_value", "at_val")  # her iki format
             f4 = dom_scen_dir in ("bearish", "neutral")
             f5 = dom_bias in ("short", "neutral")
 
