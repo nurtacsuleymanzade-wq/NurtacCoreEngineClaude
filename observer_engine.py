@@ -135,6 +135,19 @@ def _latest_at_or_before(idx: dict[int, dict], ts: int) -> dict | None:
         return None
     return idx[max(candidates)]
 
+def _latest_within_window(
+    idx: dict[int, dict], ts: int, window_ms: int, field: str
+) -> dict | None:
+    """Return the latest record in [ts - window_ms, ts] with a non-empty field."""
+    lower = ts - window_ms
+    candidates = [
+        k for k, rec in idx.items()
+        if lower <= k <= ts and rec.get(field) not in (None, "", "none", "None")
+    ]
+    if not candidates:
+        return None
+    return idx[max(candidates)]
+
 def _write_jsonl(fh, rec: dict) -> None:
     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     fh.flush()
@@ -1129,6 +1142,9 @@ def run_batch() -> None:
                 tracker.admit(s, ts, obs_fh)
 
             s1s  = _latest_at_or_before(s1s_idx, ts)
+            s1s_bos = _latest_within_window(s1s_idx, ts, 5_000, "micro_bos")
+            if s1s_bos is not None:
+                s1s = s1s_bos
             s1m  = _latest_at_or_before(s1m_idx, ts)
             vp1m = _latest_at_or_before(vp1m_idx, ts)
             gate = gate_idx.get(ts)
