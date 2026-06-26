@@ -41,7 +41,7 @@ PRIMARY_FILE   = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 STRUCT_1S_FILE = DATA_DIR / "structure_1s.jsonl"
 STRUCT_1M_FILE = DATA_DIR / "structure_1m.jsonl"
 STRUCT_5M_FILE = DATA_DIR / "structure_5m.jsonl"
-VOL_1M_FILE    = DATA_DIR / "volume_profile_1m.jsonl"
+VOL_1M_FILE    = DATA_DIR / "volume_profile.json"
 VOL_SES_FILE   = DATA_DIR / "volume_profile_session.jsonl"
 GATE_FILE      = DATA_DIR / "decision_gate_output.jsonl"
 BASELINE_FILE  = DATA_DIR / "historical_baseline_dna.jsonl"
@@ -174,7 +174,7 @@ def _s1_long_trap(primary: dict, s1s: dict | None, det: dict[str, dict | None],
           sweep.get("direction") == "upward_sweep")
     c3 = absrp.get("direction") == "buy_absorbed"
     c4 = _sf(cdna.get("delta"), 0.0) < 0
-    c5 = loc.get("position") in ("above_value", "at_vah")
+    c5 = (vp1m or {}).get("price_vs_poc") == "above" or (vp1m or {}).get("price_vs_vah") == "at"
 
     score = (1 if c1 else 0) + (2 if c2 else 0) + (2 if c3 else 0) + \
             (1 if c4 else 0) + (1 if c5 else 0)
@@ -214,7 +214,7 @@ def _s2_short_trap(primary: dict, s1s: dict | None, det: dict[str, dict | None],
           sweep.get("direction") == "downward_sweep")
     c3 = absrp.get("direction") == "sell_absorbed"
     c4 = _sf(cdna.get("delta"), 0.0) > 0
-    c5 = loc.get("position") in ("below_value", "at_val")
+    c5 = (vp1m or {}).get("price_vs_poc") == "below" or (vp1m or {}).get("price_vs_val") == "at"
 
     score = (1 if c1 else 0) + (2 if c2 else 0) + (2 if c3 else 0) + \
             (1 if c4 else 0) + (1 if c5 else 0)
