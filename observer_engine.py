@@ -58,7 +58,7 @@ DETECTOR_FILES = {
     "sweep":           DATA_DIR / "labels_sweep.jsonl",
 }
 
-MAX_OPEN_SETUPS       = 10
+MAX_OPEN_SETUPS       = 20
 SETUP_LIFETIME_MS     = 300_000   # 5 min
 WAITING_TIMEOUT_MS    = 120_000   # 2 min - setup olgunlassin
 DEVELOPING_TIMEOUT_MS = 120_000   # 2 min

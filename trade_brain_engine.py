@@ -75,6 +75,14 @@ def analyze_market() -> dict:
     dom_scenario = scen.get("dominant_scenario")
     dom_scen_dir = scen.get("dominant_direction", "neutral")
     active_scens = scen.get("active_scenarios") or []
+    # developing senaryolardan en yüksek skorlu al
+    if not dom_scenario and active_scens:
+        developing = [s for s in active_scens if s.get("status") in ("developing","confirmed")]
+        if developing:
+            best = max(developing, key=lambda x: x.get("score", 0))
+            dom_scenario = best.get("scenario_name")
+            if not dom_scen_dir or dom_scen_dir == "neutral":
+                dom_scen_dir = best.get("direction") or "neutral"
     dom_bias = bias.get("dominant_bias", "neutral")
     cascade_risk = liq.get("cascade_risk", "none")
     long_score = _sf(ev.get("long_score"))
