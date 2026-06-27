@@ -73,6 +73,21 @@ PRIMARY_FILE = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 LOG_FILE = DATA_DIR / "telegram_log.jsonl"
 HEALTH_FILE = DATA_DIR / "telegram_health.json"
 SENT_IDS_FILE = DATA_DIR / "telegram_sent_ids.json"
+SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
+TRADE_BRAIN_OUTPUT_FILE = DATA_DIR / "trade_brain_output.jsonl"
+HISTORICAL_OUTCOMES_FILE = DATA_DIR / "historical_outcomes.jsonl"
+HYPOTHESIS_OUTCOMES_FILE = DATA_DIR / "hypothesis_outcomes.jsonl"
+PROBABILITY_SURFACE_FILE = DATA_DIR / "probability_surface.json"
+CALIBRATION_PROFILES_FILE = DATA_DIR / "calibration_profiles.json"
+EDGE_MATRIX_FILE = DATA_DIR / "edge_matrix.json"
+DECISION_GATE_OUTPUT_FILE = DATA_DIR / "decision_gate_output.jsonl"
+STRUCTURE_1S_FILE = DATA_DIR / "structure_1s.jsonl"
+STRUCTURE_1M_FILE = DATA_DIR / "structure_1m.jsonl"
+VOLUME_PROFILE_FILE = DATA_DIR / "volume_profile.json"
+ZONE_CONTEXT_FILE = DATA_DIR / "zone_context.json"
+LIQUIDATION_CLUSTERS_FILE = DATA_DIR / "liquidation_clusters.jsonl"
+BIAS_CONTEXT_FILE = DATA_DIR / "bias_context.jsonl"
+REGIME_CONTEXT_FILE = DATA_DIR / "regime_context.jsonl"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -112,7 +127,10 @@ def _read_json(path: Path) -> dict | None:
     except Exception:
         return None
 
-def _read_all_jsonl(path: Path, limit: int | None = None) -> list[dict]:
+def load_json(path: Path) -> dict | None:
+    return _read_json(path)
+
+def load_recent_jsonl(path: Path, limit: int = 500) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
@@ -128,7 +146,10 @@ def _read_all_jsonl(path: Path, limit: int | None = None) -> list[dict]:
                     continue
     except Exception:
         return []
-    return rows[-limit:] if limit is not None else rows
+    return rows[-limit:]
+
+def _read_all_jsonl(path: Path, limit: int | None = None) -> list[dict]:
+    return load_recent_jsonl(path, limit or 500)
 
 def _send_telegram(text: str, parse_mode: str = "HTML") -> bool:
     """Send message to Telegram. Return True if successful or no token."""
@@ -199,6 +220,7 @@ def _write_sent_ids(sent_ids: set[str]) -> None:
 def _write_health(**payload) -> None:
     base = {
         "status": "alive",
+        "version": "v3",
         "last_blocker": None,
         "last_error": None,
         "last_sent_trade_id": None,
@@ -206,133 +228,336 @@ def _write_health(**payload) -> None:
         "last_seen_trade_id": None,
         "current_open_count": 0,
         "configured": TELEGRAM_CONFIGURED,
+        "context_enrichment": "missing",
+        "missing_context_sources": [],
+        "last_message_version": "v3",
+        "last_quality_score": "partial",
+        "warnings": [],
     }
     base.update(payload)
     _safe_write_json(HEALTH_FILE, base)
 
-def _join_context(trade: dict) -> dict:
+def _pick_str(*values, default: str = "not_available") -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"none", "null", "nan"}:
+            return text
+    return default
+
+def _pick_dict(*values) -> dict:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+def _safe_ts(value) -> int | None:
+    try:
+        ts = int(float(value))
+    except Exception:
+        return None
+    return ts * 1000 if 0 < ts < 10_000_000_000 else ts
+
+def _record_ts(record: dict) -> int | None:
+    for key in ("ts", "open_ts", "entry_ts", "created_at", "recorded_at_ts", "window_end_ts", "window_start_ts", "qualification_ts", "source_setup_ts"):
+        ts = _safe_ts(record.get(key))
+        if ts:
+            return ts
+    return None
+
+def find_by_setup_id(records: list[dict], setup_id: str | None, source_setup_id: str | None = None) -> dict | None:
+    lookup = {str(x) for x in (setup_id, source_setup_id) if x}
+    if not lookup:
+        return None
+    for rec in reversed(records):
+        rec_ids = {
+            str(rec.get("setup_id") or ""),
+            str(rec.get("source_setup_id") or ""),
+            str(rec.get("qualified_setup_id") or ""),
+            str(rec.get("trade_id") or ""),
+        }
+        if rec_ids & lookup:
+            return rec
+    return None
+
+def _nearest_by_ts(records: list[dict], target_ts: int | None, window_s: int = 120) -> dict | None:
+    if not records or not target_ts:
+        return None
+    best = None
+    best_delta = None
+    for rec in records:
+        ts = _record_ts(rec)
+        if not ts:
+            continue
+        delta = abs(ts - target_ts)
+        if delta <= window_s * 1000 and (best_delta is None or delta < best_delta):
+            best = rec
+            best_delta = delta
+    return best
+
+def _trade_ts(trade: dict) -> int | None:
+    for key in ("open_ts", "entry_ts", "ts", "created_at", "opened_ts"):
+        ts = _safe_ts(trade.get(key))
+        if ts:
+            return ts
+    return None
+
+def enrich_trade_context(trade: dict) -> dict:
     trade_id = str(trade.get("trade_id") or trade.get("id") or "")
     setup_id = str(trade.get("setup_id") or trade.get("source_setup_id") or trade.get("qualified_setup_id") or "")
+    source_setup_id = str(trade.get("source_setup_id") or trade.get("setup_id") or "")
+    qualified_setup_id = str(trade.get("qualified_setup_id") or "")
     direction = str(trade.get("direction") or trade.get("side") or "").upper() or "unknown"
     entry = _sf(trade.get("entry_price") or trade.get("open_price") or trade.get("entry") or (trade.get("entry") or {}).get("price"))
     sl = _sf(trade.get("sl_price") or trade.get("stop_loss") or trade.get("sl") or (trade.get("risk") or {}).get("sl_price"))
     tp1 = _sf(trade.get("tp1") or trade.get("tp1_price") or (trade.get("targets") or {}).get("tp1"))
     tp2 = _sf(trade.get("tp2") or trade.get("tp2_price") or (trade.get("targets") or {}).get("tp2"))
     tp3 = _sf(trade.get("tp3") or trade.get("tp3_price") or (trade.get("targets") or {}).get("tp3"))
-    source_setup_id = str(trade.get("source_setup_id") or trade.get("setup_id") or "")
-    qualified_setup_id = str(trade.get("qualified_setup_id") or "")
-    warning = "none"
 
-    def _pick_str(*values, default: str = "not_available") -> str:
-        for value in values:
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text and text.lower() not in {"none", "null", "nan"}:
-                return text
-        return default
+    trade_ts = _trade_ts(trade)
+    qualified_records = load_recent_jsonl(QUALIFIED_SETUPS_FILE, 800)
+    brain_records = load_recent_jsonl(TRADE_BRAIN_FILE, 1200)
+    brain_output_records = load_recent_jsonl(TRADE_BRAIN_OUTPUT_FILE, 2000)
+    observation_records = load_recent_jsonl(OBSERVATIONS_FILE, 2000)
+    evidence_records = load_recent_jsonl(DATA_DIR / "evidence_stream.jsonl", 2000)
+    scenario_records = load_recent_jsonl(SCENARIOS_FILE, 1200)
+    decision_gate_records = load_recent_jsonl(DECISION_GATE_OUTPUT_FILE, 1200)
+    struct1s_records = load_recent_jsonl(STRUCTURE_1S_FILE, 1200)
+    struct1m_records = load_recent_jsonl(STRUCTURE_1M_FILE, 1200)
+    liq_records = load_recent_jsonl(LIQUIDATION_CLUSTERS_FILE, 1200)
+    bias_records = load_recent_jsonl(BIAS_CONTEXT_FILE, 1200)
+    regime_records = load_recent_jsonl(REGIME_CONTEXT_FILE, 400)
 
-    def _pick_dict(*values) -> dict:
-        for value in values:
-            if isinstance(value, dict) and value:
-                return value
-        return {}
+    qualified = find_by_setup_id(qualified_records, setup_id, source_setup_id)
+    if not qualified:
+        qualified = _nearest_by_ts(qualified_records, trade_ts, 120)
 
-    qualified = None
-    if setup_id or source_setup_id or qualified_setup_id:
-        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
-        for rec in reversed(_read_all_jsonl(QUALIFIED_SETUPS_FILE, limit=200)):
-            rid = str(rec.get("source_setup_id") or rec.get("qualified_setup_id") or rec.get("setup_id") or "")
-            if rid in lookup_ids:
-                qualified = rec
-                break
-
-    brain = None
-    if setup_id or source_setup_id or qualified_setup_id:
-        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
-        for rec in reversed(_read_all_jsonl(TRADE_BRAIN_FILE, limit=400)):
-            rid = str(
-                rec.get("source_setup_id")
-                or rec.get("setup_id")
-                or rec.get("qualified_setup_id")
-                or ""
-            )
-            if rid in lookup_ids:
-                brain = rec
-                break
-
-    obs = None
-    if setup_id or source_setup_id or qualified_setup_id:
-        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
-        for rec in reversed(_read_all_jsonl(OBSERVATIONS_FILE, limit=800)):
-            rid = str(rec.get("source_setup_id") or rec.get("setup_id") or "")
-            if rid in lookup_ids:
-                obs = rec
-                break
+    resolved_source_setup_id = str((qualified or {}).get("source_setup_id") or source_setup_id or setup_id or "")
+    brain = find_by_setup_id(brain_records, resolved_source_setup_id or setup_id, resolved_source_setup_id)
+    if not brain:
+        brain = _nearest_by_ts(brain_records, trade_ts, 120)
+    brain_out = _nearest_by_ts(brain_output_records, trade_ts, 120) or find_by_setup_id(brain_output_records, resolved_source_setup_id or setup_id, resolved_source_setup_id)
+    obs = find_by_setup_id(observation_records, resolved_source_setup_id or setup_id, resolved_source_setup_id)
+    if not obs:
+        obs = _nearest_by_ts(observation_records, trade_ts, 120)
+    evidence = _nearest_by_ts(evidence_records, trade_ts, 120)
+    scenario = find_by_setup_id(scenario_records, resolved_source_setup_id or setup_id, resolved_source_setup_id)
+    if not scenario:
+        scenario = _nearest_by_ts(scenario_records, trade_ts, 120)
+    decision_gate = _nearest_by_ts(decision_gate_records, trade_ts, 120)
+    struct1s = _nearest_by_ts(struct1s_records, trade_ts, 120)
+    struct1m = _nearest_by_ts(struct1m_records, trade_ts, 120)
+    liq = _nearest_by_ts(liq_records, trade_ts, 120)
+    bias = _nearest_by_ts(bias_records, trade_ts, 120)
+    regime = _nearest_by_ts(regime_records, trade_ts, 120)
+    volume_profile = load_json(VOLUME_PROFILE_FILE) or {}
+    zone_context = load_json(ZONE_CONTEXT_FILE) or {}
+    probability_surface = load_json(PROBABILITY_SURFACE_FILE) or {}
+    calibration_profiles = load_json(CALIBRATION_PROFILES_FILE) or {}
+    edge_matrix = load_json(EDGE_MATRIX_FILE) or {}
 
     source_context = _pick_dict(
-        trade.get("context_at_open")
-        or trade.get("context")
-        or trade.get("source_context")
-        or (qualified or {}).get("context_at_qualification")
-        or (brain or {}).get("context")
-        or (brain or {}).get("context_snapshot")
-        or (qualified or {}).get("context_at_qualification")
-        or (obs or {}).get("source_context")
-        or {}
+        trade.get("context_at_open"),
+        trade.get("context"),
+        trade.get("source_context"),
+        (qualified or {}).get("context_at_qualification"),
+        (brain or {}).get("context"),
+        (brain or {}).get("context_snapshot"),
+        (brain_out or {}).get("context"),
+        (scenario or {}).get("context_snapshot"),
+        (obs or {}).get("source_context"),
     )
     scenario_snapshot = _pick_dict(
         (brain or {}).get("scenario_snapshot"),
+        (brain_out or {}).get("context", {}).get("scenario_snapshot"),
+        (scenario or {}).get("context_snapshot"),
         source_context.get("scenario_snapshot"),
-        (trade or {}).get("scenario_snapshot"),
+        trade.get("scenario_snapshot"),
     )
+
     q9_reason = _pick_str(
         (brain or {}).get("brain_questions", {}).get("Q9_market_intent", {}).get("reason"),
-        (brain or {}).get("q9_reason"),
+        (brain_out or {}).get("questions", {}).get("Q9_market_intent", {}).get("reason"),
+        (brain_out or {}).get("q9_reason"),
         (qualified or {}).get("q9_reason"),
         default="no_q9_context",
     )
-    scenario = _pick_str(
+    scenario_name = _pick_str(
         scenario_snapshot.get("dominant_scenario"),
         source_context.get("scenario"),
         source_context.get("active_scenario"),
         (qualified or {}).get("scenario"),
-        default="no_scenario",
+        default="no_active_scenario",
     )
     scenario_direction = _pick_str(
         scenario_snapshot.get("dominant_direction"),
         source_context.get("scenario_direction"),
         source_context.get("dom_bias"),
-        default="unknown",
     )
     scenario_status = _pick_str(
         scenario_snapshot.get("status"),
+        (scenario or {}).get("status"),
         (brain or {}).get("status"),
         (qualified or {}).get("status"),
-        default="not_available",
     )
-    observer_state = _pick_str(
-        (obs or {}).get("state_after"),
-        (obs or {}).get("state_before"),
-        (obs or {}).get("state"),
-        default="not_available",
-    )
-    observer_event = _pick_str((obs or {}).get("event_type"), default="not_available")
-    observer_reason = _pick_str((obs or {}).get("observer_reason"), (obs or {}).get("details"), default="not_available")
+    scenario_count = scenario_snapshot.get("scenario_count")
+    if scenario_count is None:
+        scenario_count = (scenario or {}).get("scenario_count")
+    active_scenarios = scenario_snapshot.get("active_scenarios")
+    if active_scenarios is None:
+        active_scenarios = (scenario or {}).get("active_scenarios")
+    active_scenarios = active_scenarios if isinstance(active_scenarios, list) and active_scenarios else []
+
+    observer_state = _pick_str((obs or {}).get("state_after"), (obs or {}).get("state_before"), (obs or {}).get("state"))
+    observer_event = _pick_str((obs or {}).get("event_type"))
+    observer_reason = _pick_str((obs or {}).get("observer_reason"), (obs or {}).get("details"))
+
     confidence = (brain or {}).get("confidence")
+    if confidence is None:
+        confidence = (brain_out or {}).get("confidence")
     if confidence is None:
         confidence = (qualified or {}).get("confidence")
     confidence_text = f"{confidence:.3f}" if isinstance(confidence, (int, float)) else "not_available"
+
     if entry > 0 and sl > 0 and tp1 > 0:
         dist = abs(entry - sl)
         if dist == 0:
             rr_text = "invalid"
             warning = "entry_equals_sl"
+        elif (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
+            rr_text = f"{abs(tp1 - entry) / dist:.2f}"
+            warning = "invalid_sl_geometry"
         else:
             rr_text = f"{abs(tp1 - entry) / dist:.2f}"
+            warning = "none"
     else:
         rr_text = "invalid"
         warning = "missing_entry_or_sl_or_tp1"
+
+    delta = _pick_str(
+        (evidence or {}).get("candle_dna", {}).get("delta"),
+        (evidence or {}).get("delta"),
+        (decision_gate or {}).get("baseline_context", {}).get("cvd_direction"),
+        (bias or {}).get("dominant_bias"),
+    )
+    trend_1s = _pick_str(source_context.get("trend_1s"), (struct1s or {}).get("trend", {}).get("direction"))
+    trend_1m = _pick_str(source_context.get("trend_1m"), (struct1m or {}).get("trend", {}).get("direction"))
+    micro_bos = _pick_str(source_context.get("micro_bos"), source_context.get("macro_bos"), (struct1s or {}).get("bos", {}).get("micro_bos"), (struct1m or {}).get("bos", {}).get("micro_bos"))
+    gate_grade = _pick_str(source_context.get("gate_grade"), (decision_gate or {}).get("setup_grade"), (qualified or {}).get("quality_tier"))
+    price_loc = _pick_str(source_context.get("price_loc"), source_context.get("location"), zone_context.get("price_location"))
+    poc_relation = _pick_str(volume_profile.get("price_vs_poc"), "not_available")
+    zone = _pick_str(zone_context.get("price_location"), (zone_context.get("active_fvg") or {}).get("type"), (zone_context.get("nearest_supply") or {}).get("strength"), (zone_context.get("nearest_demand") or {}).get("strength"))
+    bias_text = _pick_str(source_context.get("market_bias"), source_context.get("dom_bias"), (bias or {}).get("dominant_bias"))
+    cascade_risk = _pick_str((liq or {}).get("cascade_risk"), (liquidation := (bias or {}).get("components", {}).get("liquidation", {})).get("cascade_direction"))
+    session = _pick_str((qualified or {}).get("session_at_qualification"), source_context.get("session"), (regime or {}).get("session"))
+    liquidity = _pick_str((liq or {}).get("cascade_risk"), (liq or {}).get("long_dominant_price"), (liq or {}).get("short_dominant_price"))
+    atrit = _pick_str(
+        (decision_gate or {}).get("detector_summary", {}).get("absorption", {}).get("label"),
+        (decision_gate or {}).get("detector_summary", {}).get("initiative_flow", {}).get("label"),
+        (decision_gate or {}).get("detector_summary", {}).get("trapped_trader", {}).get("label"),
+    )
+
+    key_evidence = []
+    if isinstance(evidence, dict):
+        if evidence.get("dominant_side"):
+            key_evidence.append(f"dominant_side={evidence.get('dominant_side')}")
+        if evidence.get("score_breakdown"):
+            key_evidence.append(f"score_breakdown={evidence.get('score_breakdown')}")
+    if isinstance(decision_gate, dict) and decision_gate.get("score_breakdown"):
+        key_evidence.append(f"gate={decision_gate.get('setup_grade')} / {decision_gate.get('score_breakdown')}")
+    if volume_profile:
+        key_evidence.append(f"poc={volume_profile.get('poc_price')} {volume_profile.get('price_vs_poc')}")
+
+    historical_source = "not_available"
+    hist_wr = "not_available"
+    hist_n = "not_available"
+    hist_wilson = "not_available"
+    hist_reliability = "uncalibrated"
+    best = None
+    for detector, horizons in (probability_surface.get("detectors") or {}).items():
+        if isinstance(horizons, dict):
+            for horizon, stats in horizons.items():
+                if isinstance(stats, dict) and stats.get("n") is not None:
+                    n = stats.get("n", 0)
+                    if best is None or n > best[0]:
+                        best = (n, detector, horizon, stats)
+    if best:
+        _, detector, horizon, stats = best
+        hist_wr = stats.get("wr", "not_available")
+        hist_n = stats.get("n", "not_available")
+        hist_wilson = stats.get("wilson_lower", "not_available")
+        historical_source = f"probability_surface:{detector}/{horizon}"
+        hist_reliability = "calibrated" if isinstance(hist_n, int) and hist_n >= 30 else "low_sample"
+    elif calibration_profiles.get("by_setup_type"):
+        selected = None
+        for key, stats in calibration_profiles.get("by_setup_type", {}).items():
+            if isinstance(stats, dict) and stats.get("sample_count") is not None:
+                n = stats.get("sample_count", 0)
+                if selected is None or n > selected[0]:
+                    selected = (n, key, stats)
+        if selected:
+            _, key, stats = selected
+            hist_wr = stats.get("win_rate_observed", "not_available")
+            hist_n = stats.get("sample_count", "not_available")
+            hist_wilson = stats.get("wilson_lower", "not_available")
+            historical_source = f"calibration_profiles:{key}"
+            hist_reliability = "calibrated" if isinstance(hist_n, int) and hist_n >= 30 else "low_sample"
+    elif edge_matrix:
+        hist_wr = edge_matrix.get("wr", "not_available")
+        hist_n = edge_matrix.get("n", "not_available")
+        hist_wilson = edge_matrix.get("wilson_lower", "not_available")
+        historical_source = "edge_matrix"
+        hist_reliability = "uncalibrated" if not isinstance(hist_n, int) or hist_n < 30 else "calibrated"
+
+    quality_points = 0
+    if isinstance(confidence, (int, float)):
+        quality_points += 1
+    if observer_state == "QUALIFIED":
+        quality_points += 1
+    if scenario_name != "no_active_scenario":
+        quality_points += 1
+    if hist_wr != "not_available" and hist_n != "not_available":
+        quality_points += 1
+    if rr_text != "invalid":
+        quality_points += 1
+    if source_context:
+        quality_points += 1
+    trade_quality_score = "strong" if quality_points >= 5 else "moderate" if quality_points >= 3 else "partial"
+
+    missing = []
+    if not qualified:
+        missing.append("qualified_setups.jsonl")
+    if not brain:
+        missing.append("trade_brain_setups.jsonl")
+    if not brain_out:
+        missing.append("trade_brain_output.jsonl")
+    if not obs:
+        missing.append("observations.jsonl")
+    if not evidence:
+        missing.append("evidence_stream.jsonl")
+    if not scenario:
+        missing.append("scenarios.jsonl")
+    if historical_source == "not_available":
+        missing.extend(["probability_surface.json", "edge_matrix.json", "calibration_profiles.json"])
+    if not decision_gate:
+        missing.append("decision_gate_output.jsonl")
+    if not struct1s:
+        missing.append("structure_1s.jsonl")
+    if not struct1m:
+        missing.append("structure_1m.jsonl")
+    if not volume_profile:
+        missing.append("volume_profile.json")
+    if not zone_context:
+        missing.append("zone_context.json")
+    if not liq:
+        missing.append("liquidation_clusters.jsonl")
+    if not bias:
+        missing.append("bias_context.jsonl")
+    if not regime:
+        missing.append("regime_context.jsonl")
+
+    context_source = "enriched" if not missing else ("partial" if len(missing) < 6 else "missing")
 
     return {
         "trade_id": trade_id or "not_available",
@@ -348,45 +573,36 @@ def _join_context(trade: dict) -> dict:
         "rr_text": rr_text,
         "warning": warning,
         "confidence": confidence_text,
-        "decision": (qualified or {}).get("brain_decision") or (brain or {}).get("decision") or "unknown",
+        "decision": (qualified or {}).get("brain_decision") or (brain or {}).get("decision") or (brain_out or {}).get("decision") or "unknown",
         "q9_reason": q9_reason,
-        "scenario": scenario or "no_scenario",
+        "scenario": scenario_name,
         "scenario_direction": scenario_direction,
         "scenario_status": scenario_status,
-        "order_flow": {
-            "trend_1s": _pick_str(source_context.get("trend_1s"), default="unknown"),
-            "trend_1m": _pick_str(source_context.get("trend_1m"), default="unknown"),
-            "micro_bos": _pick_str(source_context.get("micro_bos"), source_context.get("macro_bos"), default="not_available"),
-            "gate_grade": _pick_str(source_context.get("gate_grade"), default="unknown"),
-            "price_loc": _pick_str(source_context.get("price_loc"), source_context.get("location"), source_context.get("profile_shape"), default="unknown"),
-            "dom_bias": _pick_str(source_context.get("dom_bias"), source_context.get("market_bias"), default="unknown"),
-            "cascade": _pick_str(source_context.get("cascade"), default="not_available"),
-            "session": _pick_str((qualified or {}).get("session_at_qualification"), source_context.get("session"), default="unknown"),
-        },
-        "observer": {
-            "state": observer_state,
-            "event": observer_event,
-            "reason": observer_reason,
-        },
-        "explanation": [
-            f"1. Trade Brain decision = {(qualified or {}).get('brain_decision') or (brain or {}).get('decision') or 'unknown'}.",
-            f"2. Q9 reason = {q9_reason}.",
-            f"3. Observer state = {observer_state}, event = {observer_event}.",
-        ],
-        "context_source": "enriched" if (qualified or brain or obs) else "missing",
+        "scenario_context": {"dominant": scenario_name, "direction": scenario_direction, "status": scenario_status, "score": scenario_snapshot.get("dominant_score") or scenario_snapshot.get("score") or "not_available", "active_count": scenario_count if scenario_count is not None else "not_available", "active_scenarios": active_scenarios, "q9": q9_reason},
+        "order_flow": {"delta": delta, "trend_1s": trend_1s, "trend_1m": trend_1m, "micro_bos": micro_bos, "gate_grade": gate_grade, "price_loc": price_loc, "poc_relation": poc_relation, "zone": zone, "dom_bias": bias_text, "cascade": cascade_risk, "session": session, "liquidity": liquidity, "atrit": atrit},
+        "observer": {"state": observer_state, "event": observer_event, "reason": observer_reason, "f_gates": (obs or {}).get("f_gates") or (decision_gate or {}).get("detector_summary") or {}, "age": int((time.time() * 1000 - trade_ts) / 1000) if trade_ts else "not_available"},
+        "historical_edge": {"wr": hist_wr, "n": hist_n, "wilson_lower": hist_wilson, "source": historical_source, "reliability": hist_reliability},
+        "trade_quality_score": trade_quality_score,
+        "quality_points": quality_points,
+        "key_evidence": key_evidence,
+        "context_source": context_source,
+        "missing_context_sources": missing,
+        "warnings": [warning] if warning != "none" else [],
     }
 
-def _paper_open_to_message(trade: dict) -> str | None:
-    ctx = _join_context(trade)
-    if ctx["direction"] not in ("LONG", "SHORT", "unknown"):
-        return None
-    if ctx["entry"] <= 0 or ctx["sl"] <= 0 or ctx["tp1"] <= 0:
-        return None
-    warning_text = ctx["warning"]
+def format_v3_message(trade: dict, ctx: dict) -> str:
+    warning_text = ", ".join(ctx.get("warnings") or []) if ctx.get("warnings") else "none"
     if ctx["rr_text"] == "invalid" and warning_text == "none":
         warning_text = "missing_rr_inputs"
+    trade_ts = _trade_ts(trade)
+    time_text = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(trade_ts / 1000)) if trade_ts else "not_available"
+    scenario = ctx.get("scenario_context") or {}
+    observer = ctx.get("observer") or {}
+    historical = ctx.get("historical_edge") or {}
+    quality_context = "uncalibrated" if ctx.get("trade_quality_score") == "partial" else ctx.get("confidence")
     return (
-        "🧠 NurtacCoreEngine Paper Trade Açıldı\n\n"
+        "🧠 NurtacCoreEngine — Trade Brain Report V3\n\n"
+        "📌 Trade\n"
         f"Symbol: {SYMBOL}\n"
         f"Direction: {ctx['direction']}\n"
         f"Entry: {ctx['entry']:.2f}\n"
@@ -394,36 +610,73 @@ def _paper_open_to_message(trade: dict) -> str | None:
         f"TP1: {ctx['tp1']:.2f}\n"
         f"TP2: {ctx['tp2']:.2f}\n"
         f"TP3: {ctx['tp3']:.2f}\n"
-        f"RR: {ctx['rr_text']}\n\n"
-        f"Confidence: {ctx['confidence']}\n"
+        f"RR: {ctx['rr_text']}\n"
+        f"Setup ID: {ctx['qualified_setup_id'] if ctx['qualified_setup_id'] != 'not_available' else ctx['setup_id']}\n"
+        f"Trade ID: {ctx['trade_id']}\n"
+        f"Time UTC: {time_text}\n\n"
+        "🧠 Trade Brain\n"
         f"Decision: {ctx['decision']}\n"
-        f"Scenario: {ctx['scenario']}\n"
-        f"Scenario Direction: {ctx['scenario_direction']}\n"
-        f"Scenario Status: {ctx['scenario_status']}\n"
-        f"Q9: {ctx['q9_reason']}\n\n"
-        "Order Flow:\n"
-        f"* Trend 1S: {ctx['order_flow']['trend_1s']}\n"
-        f"* Trend 1M: {ctx['order_flow']['trend_1m']}\n"
-        f"* Micro BOS: {ctx['order_flow']['micro_bos']}\n"
-        f"* Gate: {ctx['order_flow']['gate_grade']}\n"
-        f"* Price Location: {ctx['order_flow']['price_loc']}\n"
-        f"* Bias: {ctx['order_flow']['dom_bias']}\n"
-        f"* Cascade: {ctx['order_flow']['cascade']}\n"
-        f"* Session: {ctx['order_flow']['session']}\n\n"
-        "Observer:\n"
-        f"* State: {ctx['observer']['state']}\n"
-        f"* Event: {ctx['observer']['event']}\n"
-        f"* Setup ID: {ctx['source_setup_id']}\n"
-        f"* Qualified ID: {ctx['qualified_setup_id']}\n\n"
-        "Trade Brain Explanation:\n"
-        "Bu trade açıldı çünkü:\n"
-        f"{ctx['explanation'][0]}\n"
-        f"{ctx['explanation'][1]}\n"
-        f"{ctx['explanation'][2]}\n\n"
-        "Health:\n"
-        f"* Context source: {ctx['context_source']}\n"
-        f"* Warning: {warning_text}\n"
+        f"Confidence: {ctx['confidence']}\n"
+        f"Q9: {ctx['q9_reason']}\n"
+        "Explanation:\n"
+        f"- {ctx['decision']}\n"
+        f"- {ctx['q9_reason']}\n"
+        f"- {ctx['observer']['state']}\n\n"
+        "📊 Order Flow\n"
+        f"Delta: {ctx['order_flow']['delta']}\n"
+        f"Trend 1S: {ctx['order_flow']['trend_1s']}\n"
+        f"Trend 1M: {ctx['order_flow']['trend_1m']}\n"
+        f"Micro BOS: {ctx['order_flow']['micro_bos']}\n"
+        f"Gate: {ctx['order_flow']['gate_grade']}\n"
+        f"Price Location: {ctx['order_flow']['price_loc']}\n"
+        f"POC: {ctx['order_flow']['poc_relation']}\n"
+        f"Zone: {ctx['order_flow']['zone']}\n"
+        f"Bias: {ctx['order_flow']['dom_bias']}\n"
+        f"Cascade Risk: {ctx['order_flow']['cascade']}\n"
+        f"Session: {ctx['order_flow']['session']}\n"
+        f"Liquidity: {ctx['order_flow']['liquidity']}\n"
+        f"Absorption/Initiative/Trap: {ctx['order_flow']['atrit']}\n"
+        "Key Evidence:\n"
+        + "\n".join([f"- {x}" for x in (ctx.get("key_evidence") or [])[:3]]) + "\n\n"
+        "🎯 Scenario\n"
+        f"Dominant: {scenario.get('dominant')}\n"
+        f"Direction: {scenario.get('direction')}\n"
+        f"Status: {scenario.get('status')}\n"
+        f"Score: {scenario.get('score')}\n"
+        f"Active Count: {scenario.get('active_count')}\n"
+        f"Active Scenarios: {scenario.get('active_scenarios') if scenario.get('active_scenarios') else 'no_active_scenario'}\n"
+        f"Q9: {scenario.get('q9')}\n\n"
+        "📈 Historical Edge\n"
+        f"WR: {historical.get('wr')}\n"
+        f"N: {historical.get('n')}\n"
+        f"Wilson LB: {historical.get('wilson_lower')}\n"
+        f"Source: {historical.get('source')}\n"
+        f"Reliability: {historical.get('reliability')}\n\n"
+        "👁 Observer\n"
+        f"State: {observer.get('state')}\n"
+        f"Event: {observer.get('event')}\n"
+        f"F Gates: {observer.get('f_gates')}\n"
+        f"Age: {observer.get('age')}\n\n"
+        "⭐ Trade Quality\n"
+        f"Score: {ctx.get('trade_quality_score')}\n"
+        f"Confidence: {quality_context if isinstance(quality_context, str) else ctx['confidence']}\n"
+        f"Context: {ctx.get('context_source')}\n"
+        f"Warnings: {warning_text}\n"
+        f"Missing Sources: {ctx.get('missing_context_sources')}\n\n"
+        "✅ Sonuç\n"
+        f"{ctx['direction']} trade açıldı çünkü order flow, scenario ve historical edge bu kurguya destek veriyor."
     )
+
+def _join_context(trade: dict) -> dict:
+    return enrich_trade_context(trade)
+
+def _paper_open_to_message(trade: dict) -> str | None:
+    ctx = _join_context(trade)
+    if ctx["direction"] not in ("LONG", "SHORT", "unknown"):
+        return None
+    if ctx["entry"] <= 0 or ctx["sl"] <= 0 or ctx["tp1"] <= 0:
+        return None
+    return format_v3_message(trade, ctx)
 
 # ── Signal Message ─────────────────────────────────────────────────────────────
 def format_setup_message(setup: dict) -> str:
@@ -595,14 +848,26 @@ async def run_live() -> None:
                             sent_trade_ids.add(trade_id)
                             _write_sent_ids(sent_trade_ids)
                             _log_message("paper_open", msg, {"trade_id": trade_id, "setup_id": latest_open.get("source_setup_id") or latest_open.get("qualified_setup_id")})
-                            _write_health(last_status="sent", last_sent_trade_id=trade_id, last_seen_trade_id=trade_id, current_open_count=current_open)
+                            ctx = enrich_trade_context(latest_open)
+                            _write_health(
+                                version="v3",
+                                last_message_version="v3",
+                                last_status="sent",
+                                last_sent_trade_id=trade_id,
+                                last_seen_trade_id=trade_id,
+                                current_open_count=current_open,
+                                context_enrichment=ctx.get("context_source", "missing"),
+                                missing_context_sources=ctx.get("missing_context_sources", []),
+                                last_quality_score=ctx.get("trade_quality_score", "partial"),
+                                warnings=ctx.get("warnings", []),
+                            )
                             print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
                         else:
-                            _write_health(last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
+                            _write_health(version="v3", last_message_version="v3", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
                     else:
-                        _write_health(last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
+                        _write_health(version="v3", last_message_version="v3", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
             else:
-                _write_health(last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
+                _write_health(version="v3", last_message_version="v3", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -640,7 +905,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _write_health(last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
+            _write_health(version="v3", last_message_version="v3", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -656,9 +921,9 @@ async def main() -> None:
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
     if not TELEGRAM_CONFIGURED:
-        _write_health(last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
+        _write_health(version="v3", last_message_version="v3", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
     else:
-        _write_health(last_status="waiting_new_paper_trade", configured=True)
+        _write_health(version="v3", last_message_version="v3", last_status="waiting_new_paper_trade", configured=True)
 
     await run_live()
 
