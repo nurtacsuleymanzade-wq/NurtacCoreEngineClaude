@@ -188,9 +188,9 @@ def analyze_market() -> dict:
         scores["Q5_aggression"] = (0.5, 0.5, "Nötr delta")
 
     abs_dir = abs_r.get("direction")
-    if abs_dir == "buy_absorption":
+    if abs_dir in ("buy_absorption", "buy_absorbed"):
         scores["Q6_absorption"] = (0.75, 0.25, "Buy absorption — güçlü alıcı")
-    elif abs_dir == "sell_absorption":
+    elif abs_dir in ("sell_absorption", "sell_absorbed"):
         scores["Q6_absorption"] = (0.25, 0.75, "Sell absorption — güçlü satıcı")
     else:
         scores["Q6_absorption"] = (0.5, 0.5, "Absorption yok")
