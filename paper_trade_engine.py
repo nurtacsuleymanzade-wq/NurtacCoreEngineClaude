@@ -207,8 +207,8 @@ def _risk_gate(setup: dict) -> tuple[bool, str, float]:
         return False, f"TP_WRONG_SIDE tp1={tp1} >= entry={entry}", rr
 
     # Minimum RR kontrolü
-    if rr < 1.2:
-        return False, f"RR_TOO_LOW rr={rr} < 1.2", rr
+    if rr < 1.0:
+        return False, f"RR_TOO_LOW rr={rr} < 1.0", rr
 
     return True, "OK", rr
 
