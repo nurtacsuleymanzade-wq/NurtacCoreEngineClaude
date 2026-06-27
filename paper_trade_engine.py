@@ -474,7 +474,7 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     setup_type      = setup.get("setup_type", "normal")
     quality_tier    = setup.get("quality_tier", "L1_LOW")
     timeframe_source = _infer_timeframe(setup)
-    open_ts   = setup.get("qualification_ts") or int(time.time() * 1000)
+    open_ts   = int(time.time() * 1000)  # her zaman şimdiki an — qualification_ts geçmiş olabilir
     sl_pct = abs(open_price - sl_price) / open_price if open_price > 0 else 0.0
     sim = calc_position_size(
         _current_balance(state), quality_tier, sl_pct, open_price,
