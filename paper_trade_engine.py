@@ -737,7 +737,7 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
     # outcome
     if reason == "sl_hit":
         outcome = "loss"
-    elif reason == "tp3_hit":
+    elif reason in ("tp1_hit", "tp2_hit", "tp3_hit", "TP1_HIT", "TP2_HIT", "TP3_HIT"):
         outcome = "win"
     elif reason == "breakeven_stop":
         outcome = "breakeven"
