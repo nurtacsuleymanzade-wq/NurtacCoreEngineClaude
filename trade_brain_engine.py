@@ -21,22 +21,30 @@ BRAIN_FILE = DATA / "trade_brain_output.jsonl"
 BRAIN_SETUPS = DATA / "trade_brain_setups.jsonl"
 
 
-def _read_best_recent(path: str | Path, window_s: int = 10) -> dict:
-    """Son window_s saniyede gelen en güçlü (non-none) kaydı döndür."""
+def _read_best_recent(path: str | Path, window_s: int = 30) -> dict:
+    """Son window_s saniyede gelen en güçlü (non-none) kaydı döndür.
+    ts=0 olan satırlar için dosya mtime kullanılır."""
     import subprocess, time
+    from pathlib import Path as _Path
     NOW = time.time()
-    cutoff = NOW - window_s
+    p = _Path(path)
+    if not p.exists():
+        return {}
+    # Dosya son değişim zamanını al
+    file_mtime = p.stat().st_mtime
+    file_age = NOW - file_mtime
+    # Dosya çok eskiyse skip
+    if file_age > 60:
+        return {}
     best = {}
     best_score = -1
     try:
-        raw = subprocess.getoutput(f"tail -30 {path} 2>/dev/null")
-        for line in raw.splitlines():
+        raw = subprocess.getoutput(f"tail -50 {path} 2>/dev/null")
+        lines = raw.splitlines()
+        total = len(lines)
+        for i, line in enumerate(lines):
             try:
                 r = json.loads(line)
-                ts = r.get("ts", 0)
-                age = NOW - ts/1000 if ts > 1e12 else NOW - ts
-                if age > window_s:
-                    continue
                 lbl = r.get("label", "none")
                 if lbl in (None, "none", ""):
                     continue
@@ -87,9 +95,9 @@ def analyze_market() -> dict:
     ev = _read_json(DATA / "evidence_stream.jsonl")
     gate = _read_json(DATA / "decision_gate_output.jsonl")
     dna = _read_json(DATA / "combined_1s_dna_btcusdt.jsonl")
-    init_r = _read_json(DATA / "labels_initiative_flow.jsonl")
-    abs_r = _read_json(DATA / "labels_absorption.jsonl")
-    trap_r = _read_json(DATA / "labels_trapped_trader.jsonl")
+    init_r = _read_best_recent(DATA / "labels_initiative_flow.jsonl")
+    abs_r = _read_best_recent(DATA / "labels_absorption.jsonl")
+    trap_r = _read_best_recent(DATA / "labels_trapped_trader.jsonl")
 
     close_dict = (dna.get("candle_dna") or {}).get("close") or {}
     current_price = _sf(close_dict.get("price") if isinstance(close_dict, dict) else close_dict)
