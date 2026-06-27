@@ -221,7 +221,7 @@ def _write_sent_ids(sent_ids: set[str]) -> None:
 def _write_health(**payload) -> None:
     base = {
         "status": "alive",
-        "version": "v4",
+        "version": "v5_signal_hygiene",
         "last_blocker": None,
         "last_error": None,
         "last_sent_trade_id": None,
@@ -231,10 +231,16 @@ def _write_health(**payload) -> None:
         "configured": TELEGRAM_CONFIGURED,
         "context_enrichment": "missing",
         "missing_context_sources": [],
-        "last_message_version": "v4",
+        "last_message_version": "v5_signal_hygiene",
+        "last_message_type": None,
         "format_contract": "telegram_trade_message_v1",
         "last_message_sections": ["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
         "last_quality_score": "partial",
+        "last_invalid_reason": None,
+        "last_contradictions": [],
+        "message_version": "v5_signal_hygiene",
+        "compact_evidence_enabled": True,
+        "full_score_breakdown_suppressed": True,
         "warnings": [],
     }
     base.update(payload)
@@ -316,17 +322,57 @@ def _trade_ts(trade: dict) -> int | None:
             return ts
     return None
 
+def _paper_trade_status(trade: dict) -> str:
+    status = str(trade.get("status") or trade.get("state") or "").strip().lower()
+    close_reason = str(trade.get("close_reason") or "").strip().lower()
+    outcome = str((trade.get("results") or {}).get("outcome") or "").strip().lower()
+    if status == "open":
+        return "open"
+    if status == "closed":
+        return "closed"
+    if status:
+        return status
+    if close_reason or outcome:
+        return "instant_closed"
+    return "unknown"
+
+def _paper_trade_negative_duration_warning(trade: dict) -> bool:
+    try:
+        duration = trade.get("duration_seconds")
+        if duration is not None and float(duration) < 0:
+            return True
+    except Exception:
+        pass
+    validation_errors = (trade.get("validation") or {}).get("errors") or []
+    return any(str(err).strip() == "duration_seconds < 0" for err in validation_errors)
+
+def _trade_seen_status(trade: dict, source: str) -> str:
+    if source == "paper_trades_open_json":
+        return "open"
+    if source == "paper_trades_jsonl":
+        return _paper_trade_status(trade)
+    return "unknown"
+
+def _latest_paper_trade() -> dict | None:
+    trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=1)
+    return trades[-1] if trades else None
+
 def enrich_trade_context(trade: dict) -> dict:
     trade_id = str(trade.get("trade_id") or trade.get("id") or "")
     setup_id = str(trade.get("setup_id") or trade.get("source_setup_id") or trade.get("qualified_setup_id") or "")
     source_setup_id = str(trade.get("source_setup_id") or trade.get("setup_id") or "")
     qualified_setup_id = str(trade.get("qualified_setup_id") or "")
     direction = str(trade.get("direction") or trade.get("side") or "").upper() or "unknown"
+    levels = trade.get("levels") if isinstance(trade.get("levels"), dict) else {}
+    targets = trade.get("targets") if isinstance(trade.get("targets"), dict) else {}
+    risk = trade.get("risk") if isinstance(trade.get("risk"), dict) else {}
     entry = _sf(trade.get("entry_price") or trade.get("open_price") or trade.get("entry") or (trade.get("entry") or {}).get("price"))
-    sl = _sf(trade.get("sl_price") or trade.get("stop_loss") or trade.get("sl") or (trade.get("risk") or {}).get("sl_price"))
-    tp1 = _sf(trade.get("tp1") or trade.get("tp1_price") or (trade.get("targets") or {}).get("tp1"))
-    tp2 = _sf(trade.get("tp2") or trade.get("tp2_price") or (trade.get("targets") or {}).get("tp2"))
-    tp3 = _sf(trade.get("tp3") or trade.get("tp3_price") or (trade.get("targets") or {}).get("tp3"))
+    sl = _sf(trade.get("sl_price") or trade.get("stop_loss") or trade.get("sl") or risk.get("sl_price") or levels.get("sl_price"))
+    tp1 = _sf(trade.get("tp1") or trade.get("tp1_price") or targets.get("tp1") or levels.get("tp1_price"))
+    tp2 = _sf(trade.get("tp2") or trade.get("tp2_price") or targets.get("tp2") or levels.get("tp2_price"))
+    tp3 = _sf(trade.get("tp3") or trade.get("tp3_price") or targets.get("tp3") or levels.get("tp3_price"))
+    if entry <= 0:
+        entry = _sf(levels.get("entry_price") or levels.get("open_price") or levels.get("entry"))
 
     trade_ts = _trade_ts(trade)
     qualified_records = load_recent_jsonl(QUALIFIED_SETUPS_FILE, 800)
@@ -433,6 +479,13 @@ def enrich_trade_context(trade: dict) -> dict:
     if confidence is None:
         confidence = (qualified or {}).get("confidence")
     confidence_text = f"{confidence:.3f}" if isinstance(confidence, (int, float)) else "not_available"
+    trade_status = _paper_trade_status(trade)
+    close_reason = _safe_value(trade.get("close_reason"))
+    outcome = _safe_value((trade.get("results") or {}).get("outcome"))
+    pnl_r = trade.get("pnl_r")
+    if pnl_r is None:
+        pnl_r = (trade.get("results") or {}).get("pnl_r")
+    pnl_r_text = f"{_sf(pnl_r):.2f}" if pnl_r is not None else "not_available"
 
     if entry > 0 and sl > 0 and tp1 > 0:
         dist = abs(entry - sl)
@@ -677,12 +730,15 @@ def enrich_trade_context(trade: dict) -> dict:
         "historical_supported": historical_supported,
     }
     support_count = sum(1 for v in support_flags.values() if v)
-    if support_count >= 5:
+    invalid_geometry = warning != "none"
+    if support_count >= 5 and (scenario_supported or historical_supported) and not invalid_geometry and gate_grade_l in {"a", "b", "a+", "b+", "premium", "strong"} and session.upper() != "OFF_HOURS":
         trade_quality_score = "strong"
-    elif support_count >= 3:
+    elif support_count >= 4 and not invalid_geometry and not (not scenario_supported and not historical_supported):
         trade_quality_score = "moderate"
-    else:
+    elif invalid_geometry or scenario_supported or historical_supported or brain_supported or orderflow_supported or observer_supported or risk_supported:
         trade_quality_score = "partial"
+    else:
+        trade_quality_score = "weak"
     honesty_warnings = []
     if not scenario_supported and not historical_supported:
         honesty_warnings.append("uncalibrated_no_scenario_no_historical_edge")
@@ -739,6 +795,10 @@ def enrich_trade_context(trade: dict) -> dict:
         "rr_text": rr_text,
         "warning": warning,
         "confidence": confidence_text,
+        "status": trade_status,
+        "close_reason": close_reason,
+        "outcome": outcome,
+        "pnl_r": pnl_r_text,
         "decision": (qualified or {}).get("brain_decision") or (brain or {}).get("decision") or (brain_out or {}).get("decision") or "unknown",
         "q9_reason": q9_reason,
         "scenario": scenario_name,
@@ -775,87 +835,194 @@ def enrich_trade_context(trade: dict) -> dict:
         "scenario_note": scenario_note,
     }
 
-def format_trade_message_contract(trade: dict, ctx: dict) -> str:
-    def _historical_support_label(h: dict, supported: bool) -> str:
-        wr = h.get("wr")
-        n = h.get("n")
-        try:
-            n_num = float(n)
-        except Exception:
-            n_num = None
-        if supported:
-            return "YES"
-        if wr in {0, 0.0, "0", "0.0"}:
-            return "NO"
-        if wr == "not_available" or n == "not_available":
-            return "UNKNOWN"
-        if n_num is not None and n_num < 30:
-            return "WEAK"
-        return "NO"
 
-    warning_text = ", ".join(ctx.get("warnings") or []) if ctx.get("warnings") else "none"
-    if ctx["rr_text"] == "invalid" and warning_text == "none":
-        warning_text = "missing_rr_inputs"
+def _trade_status_class(ctx: dict, trade: dict) -> tuple[str, str, list[str]]:
+    warnings = list(ctx.get("warnings") or [])
+    entry = _sf(ctx.get("entry"))
+    sl = _sf(ctx.get("sl"))
+    tp1 = _sf(ctx.get("tp1"))
+    direction = str(ctx.get("direction") or "").upper()
+    close_reason = str(ctx.get("close_reason") or "").lower()
+    outcome = str(ctx.get("outcome") or "").lower()
+    pnl_r = _sf(ctx.get("pnl_r"))
+    rr_text = str(ctx.get("rr_text") or "")
+    risk_invalid = False
+    invalid_reasons = []
+
+    if entry <= 0 or sl <= 0 or tp1 <= 0:
+        risk_invalid = True
+        invalid_reasons.append("missing_entry_or_sl_or_tp1")
+    if rr_text == "invalid":
+        risk_invalid = True
+        invalid_reasons.append("invalid_rr")
+    if entry > 0 and sl > 0:
+        if direction == "LONG" and sl >= entry:
+            risk_invalid = True
+            invalid_reasons.append("entry_equals_sl_or_bad_geometry")
+        if direction == "SHORT" and sl <= entry:
+            risk_invalid = True
+            invalid_reasons.append("entry_equals_sl_or_bad_geometry")
+    if close_reason == "sl_hit" and pnl_r >= 0:
+        risk_invalid = True
+        invalid_reasons.append("sl_hit_nonnegative_pnl")
+    if outcome == "loss" and pnl_r == 0:
+        risk_invalid = True
+        invalid_reasons.append("loss_with_zero_pnl")
+
+    session = str(ctx.get("order_flow", {}).get("session") or "").upper()
+    gate = str(ctx.get("order_flow", {}).get("gate_grade") or "").upper()
+    hist = ctx.get("historical_supported")
+    scen = ctx.get("scenario_supported")
+    quality = str(ctx.get("trade_quality_score") or "partial").lower()
+    confidence = _sf(ctx.get("confidence"))
+    experimental = (
+        not scen and not hist and session == "OFF_HOURS" and gate in {"", "NONE", "C", "L1_LOW"} and confidence < 0.62
+    )
+
+    if risk_invalid:
+        return "INVALID_TRADE_RECORD", "; ".join(invalid_reasons) or "invalid_geometry", warnings
+    if outcome in {"closed", "win", "loss", "breakeven", "timeout_win", "timeout_loss", "timeout_flat"} or ctx.get("status") == "closed":
+        return ("VALID_CLOSED_TRADE" if not experimental else "EXPERIMENTAL_LOW_QUALITY_TRADE"), "", warnings
+    if experimental:
+        return "EXPERIMENTAL_LOW_QUALITY_TRADE", "", warnings
+    return "VALID_OPEN_TRADE", "", warnings
+
+
+def _compact_evidence(ctx: dict) -> tuple[list[str], list[str], list[str]]:
+    trade_dir = str(ctx.get("direction") or "").lower()
+    evidence = ctx.get("order_flow") or {}
+    support = []
+    oppose = []
+    keys = []
+    score_breakdown = ctx.get("score_breakdown") or {}
+    for k, v in score_breakdown.items():
+        val = _sf(v)
+        keys.append((k, val))
+    for key, val in sorted(keys, key=lambda x: abs(x[1]), reverse=True):
+        if val == 0:
+            continue
+        lower = key.lower()
+        is_long_key = "_long" in lower or "long" in lower or "bull" in lower
+        is_short_key = "_short" in lower or "bear" in lower or "sell" in lower
+        text = f"{key} {val:+.1f}"
+        if trade_dir == "long":
+            if is_long_key and len(support) < 5:
+                support.append(text)
+            elif is_short_key and len(oppose) < 3:
+                oppose.append(text)
+        elif trade_dir == "short":
+            if is_short_key and len(support) < 5:
+                support.append(text)
+            elif is_long_key and len(oppose) < 3:
+                oppose.append(text)
+    contradictions = []
+    delta = _sf(evidence.get("delta"))
+    trend_1m = str(evidence.get("trend_1m") or "").lower()
+    bias = str(evidence.get("dom_bias") or "").lower()
+    scenario_dir = str(ctx.get("scenario_direction") or "").lower()
+    dominant_side = str((ctx.get("evidence_snapshot") or {}).get("dominant_side") or evidence.get("dominant_side") or "").lower()
+    gate = str(evidence.get("gate_grade") or "").lower()
+    hist_supported = bool(ctx.get("historical_supported"))
+    hist_wr = _sf((ctx.get("historical_edge") or {}).get("wr"))
+    hist_n = _sf((ctx.get("historical_edge") or {}).get("n"))
+    calibrated = hist_n >= 30 and hist_wr >= 0
+    if trade_dir == "long":
+        if dominant_side == "short":
+            contradictions.append("dominant_side=short")
+        if "down" in trend_1m:
+            contradictions.append("trend_1m=downtrend")
+        if delta < 0:
+            contradictions.append("delta<0")
+        if bias == "short":
+            contradictions.append("bias=short")
+        if gate in {"c", "l1_low", "none"}:
+            contradictions.append("gate=weak")
+        if scenario_dir == "bearish":
+            contradictions.append("scenario_direction=bearish")
+        if calibrated and not hist_supported and hist_wr == 0:
+            contradictions.append("historical_support=false_wr0")
+    elif trade_dir == "short":
+        if dominant_side == "long":
+            contradictions.append("dominant_side=long")
+        if "up" in trend_1m:
+            contradictions.append("trend_1m=uptrend")
+        if delta > 0:
+            contradictions.append("delta>0")
+        if bias == "long":
+            contradictions.append("bias=long")
+        if gate in {"c", "l1_low", "none"}:
+            contradictions.append("gate=weak")
+        if scenario_dir == "bullish":
+            contradictions.append("scenario_direction=bullish")
+        if calibrated and not hist_supported and hist_wr == 0:
+            contradictions.append("historical_support=false_wr0")
+    return support, oppose, contradictions
+
+
+def _result_sentence(message_type: str, ctx: dict, contradictions: list[str]) -> str:
+    scenario_supported = bool(ctx.get("scenario_supported"))
+    historical_supported = bool(ctx.get("historical_supported"))
+    if message_type == "INVALID_TRADE_RECORD":
+        return "Bu kayıt geçersiz: entry/SL geometry veya RR invalid. Learning’e alınmamalı."
+    if message_type == "EXPERIMENTAL_LOW_QUALITY_TRADE":
+        return "Bu trade paper-learning için açıldı; scenario ve historical edge desteği yok, bu yüzden düşük güvenilirlikte izlenmeli."
+    if contradictions:
+        return "Bu trade çelişkili context ile açıldı; learning/paper amaçlı izlenmeli."
+    if not scenario_supported and not historical_supported:
+        return "Trade Brain ve Observer zinciri trade’i açtı; ancak scenario/historical destek yok. Karar order-flow ağırlıklı ve henüz kalibre edilmemiş."
+    return "Trade Brain, Observer, risk, order-flow ve historical/scenario desteği aynı yönde olduğu için trade yüksek kalite olarak işaretlendi."
+
+def format_trade_message_contract(trade: dict, ctx: dict) -> str:
+    trade_type, invalid_reason, warnings = _trade_status_class(ctx, trade)
+    support_evidence, oppose_evidence, contradictions = _compact_evidence(ctx)
+    if trade_type == "INVALID_TRADE_RECORD" and invalid_reason not in warnings:
+        warnings.append(invalid_reason)
+    if contradictions and "decision_context_contradiction" not in warnings:
+        warnings.append("decision_context_contradiction")
+
     trade_ts = _trade_ts(trade)
     time_text = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(trade_ts / 1000)) if trade_ts else "not_available"
     scenario = ctx.get("scenario_context") or {}
     observer = ctx.get("observer") or {}
     historical = ctx.get("historical_edge") or {}
-    probability = ctx.get("probability") or {}
-    calibration = ctx.get("calibration") or {}
-    risk = ctx.get("risk") or {}
-    ai_expl = ctx.get("key_evidence") or []
-    quality_context = "uncalibrated" if ctx.get("trade_quality_score") == "partial" else ctx.get("confidence")
-    historical_supported = bool(ctx.get("historical_supported"))
-    scenario_supported = bool(ctx.get("scenario_supported"))
-    orderflow_supported = bool(ctx.get("orderflow_supported"))
-    observer_supported = bool(ctx.get("observer_supported"))
-    risk_supported = bool(ctx.get("risk_supported"))
-    brain_supported = bool(ctx.get("brain_supported"))
-
-    historical_note = ctx.get("historical_note") or "No reliable historical sample found."
-    scenario_note = ctx.get("scenario_note") or "Scenario context is unconfirmed."
-
-    result_reasons = []
-    if brain_supported:
-        result_reasons.append("Trade Brain yön verdi")
-    if observer_supported:
-        result_reasons.append("Observer QUALIFIED yaptı")
-    if risk_supported:
-        result_reasons.append("risk yapısı geçerli")
-    if orderflow_supported:
-        result_reasons.append("order flow destekledi")
-    if scenario_supported:
-        result_reasons.append("scenario destekledi")
-    else:
-        result_reasons.append("Scenario desteği yok")
-    if historical_supported:
-        result_reasons.append("historical edge destekledi")
-    else:
-        result_reasons.append("Historical edge henüz desteklemiyor")
-    if not any([brain_supported, observer_supported, risk_supported, orderflow_supported, scenario_supported, historical_supported]):
-        result_reasons = ["destek sinyali yetersiz"]
-    setup_display = _safe_value(ctx.get("qualified_setup_id"), ctx.get("setup_id"))
-    explanation_lines = (ctx.get("key_evidence") or [])[:3]
-    explanation_lines = explanation_lines or ["not_available"]
-    key_evidence_lines = (ctx.get("key_evidence") or [])[:3] or ["not_available"]
-    scenario_active = scenario.get("active_scenarios") if scenario.get("active_scenarios") else "no_active_scenario"
-    support_label = _historical_support_label(historical, historical_supported)
+    orderflow = ctx.get("order_flow") or {}
     trade_quality = _safe_value(ctx.get("trade_quality_score"), "partial")
-    scenario_support_label = "YES" if scenario_supported else "NO"
-    scenario_status_display = "no_active_scenario" if _safe_value(scenario.get('dominant'), 'no_active_scenario') == "no_active_scenario" else _safe_value(scenario.get('status'))
-    contract_lines = [
+    setup_display = _pick_str(
+        ctx.get("setup_id"),
+        ctx.get("source_setup_id"),
+        ctx.get("qualified_setup_id"),
+        ctx.get("source_setup_id"),
+        trade.get("source_setup_id"),
+        trade.get("qualified_setup_id"),
+        default="missing_setup_id",
+    )
+    if setup_display == "not_available":
+        setup_display = "missing_setup_id"
+        if "missing_setup_id" not in warnings:
+            warnings.append("missing_setup_id")
+
+    message_title = {
+        "INVALID_TRADE_RECORD": "⚠️ NurtacCoreEngine — Invalid Paper Trade Record",
+        "EXPERIMENTAL_LOW_QUALITY_TRADE": "🧪 Experimental Paper Trade",
+        "VALID_CLOSED_TRADE": "✅ Valid Closed Paper Trade",
+        "VALID_OPEN_TRADE": "📌 Valid Open Paper Trade",
+    }.get(trade_type, "📌 Paper Trade")
+
+    top_support = support_evidence[:5] or ["not_available"]
+    top_oppose = oppose_evidence[:3] or ["not_available"]
+    top_scenario = _pick_str(scenario.get("dominant"), scenario.get("dominant_scenario"), default="no_active_scenario")
+    scenario_count = _safe_value(scenario.get("active_count"), _safe_value(scenario.get("scenario_count"), "not_available"))
+    result_sentence = _result_sentence(trade_type, ctx, contradictions)
+
+    lines = [
+        message_title,
         "📌 Trade",
         f"Symbol: {_safe_value(SYMBOL)}",
         f"Direction: {_safe_value(ctx['direction']).upper()}",
-        f"Entry: {ctx['entry']:.2f}",
-        f"SL: {ctx['sl']:.2f}",
-        f"TP1: {ctx['tp1']:.2f}",
-        f"TP2: {ctx['tp2']:.2f}",
-        f"TP3: {ctx['tp3']:.2f}",
-        f"RR: {_safe_value(ctx['rr_text'])}",
-        f"Setup ID: {setup_display}",
-        f"Trade ID: {_safe_value(ctx['trade_id'])}",
+        f"Status: {_safe_value(ctx.get('status'))}",
+        f"Entry: {ctx['entry']:.2f} | SL: {ctx['sl']:.2f} | TP1: {ctx['tp1']:.2f}",
+        f"TP2: {ctx['tp2']:.2f} | TP3: {ctx['tp3']:.2f}",
+        f"RR: {_safe_value(ctx['rr_text'])} | Setup ID: {setup_display} | Trade ID: {_safe_value(ctx['trade_id'])}",
         f"Time UTC: {time_text}",
         "",
         "🧠 Trade Brain",
@@ -863,56 +1030,39 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
         f"Confidence: {_safe_value(ctx['confidence'])}",
         f"Q9: {_safe_value(ctx['q9_reason'])}",
         "Explanation:",
-        *[f"- {_safe_value(x)}" for x in explanation_lines[:3]],
+        *[f"- {_safe_value(x)}" for x in (ctx.get("key_evidence") or [])[:3] or ["not_available"]],
         "",
         "📊 Order Flow",
-        f"Delta: {_safe_value(ctx['order_flow']['delta'])}",
-        f"Trend 1S: {_safe_value(ctx['order_flow']['trend_1s'])}",
-        f"Trend 1M: {_safe_value(ctx['order_flow']['trend_1m'])}",
-        f"Micro BOS: {_safe_value(ctx['order_flow']['micro_bos'])}",
-        f"Gate: {_safe_value(ctx['order_flow']['gate_grade'])}",
-        f"Price Location: {_safe_value(ctx['order_flow']['price_loc'])}",
-        f"POC: {_safe_value(ctx['order_flow']['poc_relation'])}",
-        f"Zone: {_safe_value(ctx['order_flow']['zone'])}",
-        f"Bias: {_safe_value(ctx['order_flow']['dom_bias'])}",
-        f"Cascade Risk: {_safe_value(ctx['order_flow']['cascade'])}",
-        f"Session: {_safe_value(ctx['order_flow']['session'])}",
-        "Key Evidence:",
-        *[f"- {_safe_value(x)}" for x in key_evidence_lines[:3]],
+        f"Delta: {_safe_value(orderflow.get('delta'))} | Trend 1M: {_safe_value(orderflow.get('trend_1m'))} | Micro BOS: {_safe_value(orderflow.get('micro_bos'))}",
+        f"Gate: {_safe_value(orderflow.get('gate_grade'))} | Price Location: {_safe_value(orderflow.get('price_loc'))} | POC: {_safe_value(orderflow.get('poc_relation'))}",
+        f"Bias: {_safe_value(orderflow.get('dom_bias'))} | Session: {_safe_value(orderflow.get('session'))}",
+        "Top Evidence:",
+        *[f"- {_safe_value(x)}" for x in top_support],
+        "Top Opposition:",
+        *[f"- {_safe_value(x)}" for x in top_oppose],
         "",
         "🎯 Scenario",
-        f"Dominant: {_safe_value(scenario.get('dominant'), 'no_active_scenario')}",
-        f"Direction: {_safe_value(scenario.get('direction'))}",
-        f"Status: {scenario_status_display}",
-        f"Support: {scenario_support_label}",
-        f"Score: {_safe_value(scenario.get('score'))}",
-        f"Active Count: {_safe_value(scenario.get('active_count'))}",
-        f"Active Scenarios: {_safe_value(scenario_active, 'no_active_scenario')}",
+        f"Dominant: {top_scenario}",
+        f"Active Count: {scenario_count}",
+        f"Support: {'YES' if bool(ctx.get('scenario_supported')) else 'NO'}",
         "",
         "📈 Historical Edge",
-        f"WR: {_safe_value(historical.get('wr'))}",
-        f"N: {_safe_value(historical.get('n'))}",
-        f"Wilson LB: {_safe_value(historical.get('wilson_lower'))}",
-        f"Source: {_safe_value(historical.get('source'))}",
-        f"Reliability: {_safe_value(historical.get('reliability'))}",
-        f"Support: {support_label}",
-        f"Note: {_safe_value(historical_note)}",
+        f"WR: {_safe_value(historical.get('wr'))} | N: {_safe_value(historical.get('n'))} | Wilson LB: {_safe_value(historical.get('wilson_lower'))}",
+        f"Source: {_safe_value(historical.get('source'))} | Reliability: {_safe_value(historical.get('reliability'))}",
+        f"Support: {'YES' if bool(ctx.get('historical_supported')) else 'NO'}",
         "",
         "👁 Observer",
-        f"State: {_safe_value(observer.get('state'))}",
-        f"Event: {_safe_value(observer.get('event'))}",
-        f"F Gates: {_safe_value(observer.get('f_gates'))}",
-        f"Age: {_safe_value(observer.get('age'))}",
+        f"State: {_safe_value(observer.get('state'))} | Event: {_safe_value(observer.get('event'))} | Age: {_safe_value(observer.get('age'))}",
         "",
         "⭐ Trade Quality",
         f"Score: {trade_quality}",
         f"Context: {_safe_value(ctx.get('context_source'))}",
-        f"Warnings: {_safe_value(warning_text)}",
+        f"Warnings: {_safe_value(', '.join(warnings) if warnings else 'none')}",
         "",
         "✅ Sonuç",
-        f"{_safe_value(ctx['direction']).upper()} trade açıldı çünkü: " + "; ".join([x for x in result_reasons if x]),
+        result_sentence,
     ]
-    return "\n".join(contract_lines)
+    return "\n".join(lines)
 
 def _join_context(trade: dict) -> dict:
     return enrich_trade_context(trade)
@@ -920,8 +1070,6 @@ def _join_context(trade: dict) -> dict:
 def _paper_open_to_message(trade: dict) -> str | None:
     ctx = _join_context(trade)
     if ctx["direction"] not in ("LONG", "SHORT", "unknown"):
-        return None
-    if ctx["entry"] <= 0 or ctx["sl"] <= 0 or ctx["tp1"] <= 0:
         return None
     return format_trade_message_contract(trade, ctx)
 
@@ -1045,33 +1193,42 @@ def format_close_message(trade: dict) -> str | None:
     direction = trade.get("direction", "").upper()
     if direction not in ["LONG", "SHORT"]:
         return None
-
-    reason = trade.get("close_reason", "CLOSED")
+    ctx = _join_context(trade)
+    msg_type, invalid_reason, warnings = _trade_status_class(ctx, trade)
+    if msg_type == "VALID_OPEN_TRADE":
+        msg_type = "VALID_CLOSED_TRADE"
+    if msg_type == "INVALID_TRADE_RECORD" and invalid_reason not in warnings:
+        warnings.append(invalid_reason)
+    title = {
+        "INVALID_TRADE_RECORD": "⚠️ NurtacCoreEngine — Invalid Paper Trade Record",
+        "EXPERIMENTAL_LOW_QUALITY_TRADE": "🧪 Experimental Paper Trade",
+        "VALID_CLOSED_TRADE": "✅ Valid Closed Paper Trade",
+    }.get(msg_type, "✅ Valid Closed Paper Trade")
     entry = _sf(trade.get("entry_price", 0))
     close = _sf(trade.get("close_price", 0))
     pnl_r = _sf(trade.get("pnl_r", 0))
-
-    entry_ts = trade.get("entry_ts")
-    close_ts = trade.get("close_ts")
-    duration_min = 0
-    if entry_ts and close_ts:
-        duration_min = int((close_ts - entry_ts) / 1000 / 60)
-
-    emoji = "✅" if pnl_r > 0 else "❌"
-    msg = f"""{emoji} {reason} — {direction} {SYMBOL}
-━━━━━━━━━━━━━━━━━━━
-⏰ {get_time_utc4()} | Süre: {duration_min}dk
-📍 Entry: ${entry:.2f} → Close: ${close:.2f}
-💰 PnL: {pnl_r:+.2f}R
-"""
-    return msg
+    close_reason = trade.get("close_reason", "CLOSED")
+    trade_ts = _trade_ts(trade)
+    time_text = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(trade_ts / 1000)) if trade_ts else "not_available"
+    duration_seconds = _sf(trade.get("duration_seconds", 0))
+    return (
+        f"{title}\n"
+        f"📌 Trade\n"
+        f"Symbol: {SYMBOL}\n"
+        f"Direction: {direction}\n"
+        f"Status: closed\n"
+        f"Entry: {entry:.2f} | Close: {close:.2f}\n"
+        f"Close Reason: {close_reason} | PnL R: {pnl_r:+.2f}\n"
+        f"Duration: {duration_seconds:.0f}s | Time UTC: {time_text}\n"
+        f"⭐ Trade Quality: {_safe_value(ctx.get('trade_quality_score'), 'partial')}\n"
+        f"Warnings: {', '.join(warnings) if warnings else 'none'}\n"
+    )
 
 # ── Main Loop ──────────────────────────────────────────────────────────────────
 async def run_live() -> None:
     """Live mode: watch for signals and send Telegram messages."""
     print("[TELEGRAM] Live mode — waiting for signals", flush=True)
 
-    sent_signal_ids = set()
     sent_trade_ids = _load_sent_ids()
     last_15min_report = time.time()
     last_seen_trade_id = None
@@ -1084,29 +1241,81 @@ async def run_live() -> None:
                 open_trades = []
             current_open = len(open_trades)
             latest_open = open_trades[-1] if open_trades else None
-            if latest_open:
-                trade_id = str(latest_open.get("trade_id") or latest_open.get("id") or "")
+            source = "paper_trades_open_json"
+            candidate = latest_open
+            if not candidate:
+                candidate = _latest_paper_trade()
+                source = "paper_trades_jsonl" if candidate else source
+            if candidate:
+                trade_id = str(candidate.get("trade_id") or candidate.get("id") or "")
                 last_seen_trade_id = trade_id or last_seen_trade_id
-                if trade_id and trade_id not in sent_trade_ids:
-                    msg = _paper_open_to_message(latest_open)
+                seen_status = _trade_seen_status(candidate, source)
+                negative_duration = _paper_trade_negative_duration_warning(candidate)
+                ctx = enrich_trade_context(candidate)
+                trade_type, invalid_reason, trade_contradictions = _trade_status_class(ctx, candidate)
+                warnings = list(ctx.get("warnings", []))
+                if negative_duration and "paper_trade_negative_duration" not in warnings:
+                    warnings.append("paper_trade_negative_duration")
+                if trade_contradictions and "decision_context_contradiction" not in warnings:
+                    warnings.append("decision_context_contradiction")
+                ctx["warnings"] = warnings
+                if trade_id and trade_id in sent_trade_ids:
+                    _write_health(
+                        version="v5_signal_hygiene",
+                        last_message_version="v5_signal_hygiene",
+                        last_status="duplicate_already_sent",
+                        last_blocker="duplicate_already_sent",
+                        last_sent_trade_id=trade_id,
+                        last_seen_trade_id=trade_id,
+                        last_seen_trade_source=source,
+                        last_seen_trade_status=seen_status,
+                        last_seen_close_reason=_safe_value(candidate.get("close_reason")),
+                        instant_trade_caught=source == "paper_trades_jsonl" and seen_status in {"closed", "instant_closed"},
+                        current_open_count=current_open,
+                        context_enrichment=ctx.get("context_source", "missing"),
+                        missing_context_sources=ctx.get("missing_context_sources", []),
+                        last_quality_score=ctx.get("trade_quality_score", "partial"),
+                        last_message_type=trade_type,
+                        last_invalid_reason=invalid_reason or None,
+                        last_contradictions=trade_contradictions,
+                        warnings=warnings,
+                        honesty_version="v4_truth_audit",
+                        support_flags=ctx.get("support_flags", {}),
+                        support_count=ctx.get("support_count", 0),
+                        message_honesty="honest",
+                        format_contract="telegram_trade_message_v1",
+                        last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
+                    )
+                elif trade_id:
+                    msg = _paper_open_to_message(candidate)
                     if msg:
                         ok = _send_telegram(msg)
                         if ok:
                             sent_trade_ids.add(trade_id)
                             _write_sent_ids(sent_trade_ids)
-                            _log_message("paper_open", msg, {"trade_id": trade_id, "setup_id": latest_open.get("source_setup_id") or latest_open.get("qualified_setup_id")})
-                            ctx = enrich_trade_context(latest_open)
+                            _log_message(
+                                "paper_trade",
+                                msg,
+                                {"trade_id": trade_id, "setup_id": candidate.get("source_setup_id") or candidate.get("qualified_setup_id"), "source": source},
+                            )
                             _write_health(
-                                version="v4",
-                                last_message_version="v4",
+                                version="v5_signal_hygiene",
+                                last_message_version="v5_signal_hygiene",
                                 last_status="sent",
                                 last_sent_trade_id=trade_id,
                                 last_seen_trade_id=trade_id,
+                                last_seen_trade_source=source,
+                                last_seen_trade_status=seen_status,
+                                last_seen_close_reason=_safe_value(candidate.get("close_reason")),
+                                instant_trade_caught=source == "paper_trades_jsonl" and seen_status in {"closed", "instant_closed"},
                                 current_open_count=current_open,
                                 context_enrichment=ctx.get("context_source", "missing"),
                                 missing_context_sources=ctx.get("missing_context_sources", []),
                                 last_quality_score=ctx.get("trade_quality_score", "partial"),
-                                warnings=ctx.get("warnings", []),
+                                last_message_type=trade_type,
+                                last_invalid_reason=invalid_reason or None,
+                                last_contradictions=trade_contradictions,
+                                warnings=warnings,
                                 honesty_version="v4_truth_audit",
                                 support_flags=ctx.get("support_flags", {}),
                                 support_count=ctx.get("support_count", 0),
@@ -1114,13 +1323,64 @@ async def run_live() -> None:
                                 format_contract="telegram_trade_message_v1",
                                 last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
                             )
-                            print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
+                            print(f"[TELEGRAM] Paper trade sent: {trade_id} source={source}", flush=True)
                         else:
-                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+                            _write_health(
+                                version="v5_signal_hygiene",
+                                last_message_version="v5_signal_hygiene",
+                                last_status="telegram_api_error",
+                                last_blocker="telegram_api_error",
+                                last_error="sendMessage failed",
+                                last_seen_trade_id=trade_id,
+                                last_seen_trade_source=source,
+                                last_seen_trade_status=seen_status,
+                                last_seen_close_reason=_safe_value(candidate.get("close_reason")),
+                                instant_trade_caught=source == "paper_trades_jsonl" and seen_status in {"closed", "instant_closed"},
+                                current_open_count=current_open,
+                                last_message_type=trade_type,
+                                last_invalid_reason=invalid_reason or None,
+                                last_contradictions=trade_contradictions,
+                                honesty_version="v4_truth_audit",
+                                message_honesty="honest",
+                                format_contract="telegram_trade_message_v1",
+                                last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
+                                warnings=warnings,
+                            )
                     else:
-                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+                        _write_health(
+                            version="v5_signal_hygiene",
+                            last_message_version="v5_signal_hygiene",
+                            last_status="paper_schema_mismatch",
+                            last_blocker="paper_schema_mismatch",
+                            last_error="missing entry/sl/tp1",
+                            last_seen_trade_id=trade_id,
+                            last_seen_trade_source=source,
+                            last_seen_trade_status=seen_status,
+                            last_seen_close_reason=_safe_value(candidate.get("close_reason")),
+                            instant_trade_caught=source == "paper_trades_jsonl" and seen_status in {"closed", "instant_closed"},
+                            current_open_count=current_open,
+                            last_message_type=trade_type,
+                            last_invalid_reason=invalid_reason or None,
+                            last_contradictions=trade_contradictions,
+                            honesty_version="v4_truth_audit",
+                            message_honesty="honest",
+                            format_contract="telegram_trade_message_v1",
+                            last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
+                            warnings=warnings,
+                        )
             else:
-                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+                _write_health(
+                    version="v5_signal_hygiene",
+                    last_message_version="v5_signal_hygiene",
+                    last_status="waiting_new_paper_trade",
+                    last_blocker="waiting_new_paper_trade",
+                    last_seen_trade_id=last_seen_trade_id,
+                    current_open_count=0,
+                    honesty_version="v4_truth_audit",
+                    message_honesty="honest",
+                    format_contract="telegram_trade_message_v1",
+                    last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
+                )
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -1158,7 +1418,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e), honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+            _write_health(version="v5_signal_hygiene", last_message_version="v5_signal_hygiene", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e), honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -1170,13 +1430,13 @@ async def main() -> None:
         print("[TELEGRAM] SYSTEM_HALT exists — exiting", flush=True)
         return
 
-    print("[TELEGRAM] === NurtacCoreEngineClaude Telegram Reporter (v2) ===", flush=True)
+    print("[TELEGRAM] === NurtacCoreEngineClaude Telegram Reporter (v5_signal_hygiene) ===", flush=True)
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
     if not TELEGRAM_CONFIGURED:
-        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+        _write_health(version="v5_signal_hygiene", last_message_version="v5_signal_hygiene", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
     else:
-        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
+        _write_health(version="v5_signal_hygiene", last_message_version="v5_signal_hygiene", last_status="waiting_new_paper_trade", configured=True, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
 
     await run_live()
 
