@@ -435,6 +435,26 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     if direction not in ("long", "short"):
         _set_blocker(state, "schema_mismatch_fixed_but_waiting_new_setup", setup, {"direction": direction})
         return False
+    # C4b: Trade Brain yön uyumu — Brain karşı yön diyorsa açma
+    try:
+        import subprocess as _sp, json as _json
+        _tb = _json.loads(_sp.getoutput("tail -1 data/trade_brain_output.jsonl 2>/dev/null"))
+        _brain_dec = _tb.get("decision","neutral")
+        _brain_conf = float(_tb.get("confidence",0) or 0)
+        _brain_ts = _tb.get("ts",0) or 0
+        _brain_age = int(time.time()*1000) - _brain_ts
+        # Brain karar 30s içindeyse ve karşı yön diyorsa skip
+        if _brain_age < 30000 and _brain_conf >= 0.55:
+            if direction == "long" and _brain_dec == "short":
+                _set_blocker(state, "brain_direction_mismatch", setup,
+                    {"setup": direction, "brain": _brain_dec, "brain_conf": _brain_conf})
+                return False
+            if direction == "short" and _brain_dec == "long":
+                _set_blocker(state, "brain_direction_mismatch", setup,
+                    {"setup": direction, "brain": _brain_dec, "brain_conf": _brain_conf})
+                return False
+    except Exception:
+        pass  # Brain okunamazsa engelleme
     if not is_qualified_setup_record(setup):
         _set_blocker(state, "schema_mismatch_fixed_but_waiting_new_setup", setup, {"qualified": False})
         return
