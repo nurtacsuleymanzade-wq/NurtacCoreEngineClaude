@@ -25,7 +25,7 @@ REGIME_SETUP_COMPAT = {
         "RECLAIM_short",
         "initiative_flow_sell",
     ],
-    "RANGING": ["REVERSAL_long", "REVERSAL_short", "STOP_HUNT_RECLAIM"],
+    "RANGING": [],  # Ranging piyasada kısıtlama yok — tüm setup tiplerine izin ver
     "BREAKOUT": ["BREAKOUT_CONTINUATION_long", "BREAKOUT_CONTINUATION_short"],
     "VOLATILE": [],
 }
