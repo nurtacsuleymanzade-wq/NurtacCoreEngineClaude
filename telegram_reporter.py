@@ -73,6 +73,7 @@ PRIMARY_FILE = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 LOG_FILE = DATA_DIR / "telegram_log.jsonl"
 HEALTH_FILE = DATA_DIR / "telegram_health.json"
 SENT_IDS_FILE = DATA_DIR / "telegram_sent_ids.json"
+BASELINE_DNA_FILE = DATA_DIR / "historical_baseline_dna.jsonl"
 SCENARIOS_FILE = DATA_DIR / "scenarios.jsonl"
 TRADE_BRAIN_OUTPUT_FILE = DATA_DIR / "trade_brain_output.jsonl"
 HISTORICAL_OUTCOMES_FILE = DATA_DIR / "historical_outcomes.jsonl"
@@ -220,7 +221,7 @@ def _write_sent_ids(sent_ids: set[str]) -> None:
 def _write_health(**payload) -> None:
     base = {
         "status": "alive",
-        "version": "v3",
+        "version": "v4",
         "last_blocker": None,
         "last_error": None,
         "last_sent_trade_id": None,
@@ -230,7 +231,7 @@ def _write_health(**payload) -> None:
         "configured": TELEGRAM_CONFIGURED,
         "context_enrichment": "missing",
         "missing_context_sources": [],
-        "last_message_version": "v3",
+        "last_message_version": "v4",
         "last_quality_score": "partial",
         "warnings": [],
     }
@@ -356,6 +357,7 @@ def enrich_trade_context(trade: dict) -> dict:
     probability_surface = load_json(PROBABILITY_SURFACE_FILE) or {}
     calibration_profiles = load_json(CALIBRATION_PROFILES_FILE) or {}
     edge_matrix = load_json(EDGE_MATRIX_FILE) or {}
+    baseline_dna = _nearest_by_ts(load_recent_jsonl(BASELINE_DNA_FILE, 20), trade_ts, 120)
 
     source_context = _pick_dict(
         trade.get("context_at_open"),
@@ -468,6 +470,10 @@ def enrich_trade_context(trade: dict) -> dict:
         key_evidence.append(f"gate={decision_gate.get('setup_grade')} / {decision_gate.get('score_breakdown')}")
     if volume_profile:
         key_evidence.append(f"poc={volume_profile.get('poc_price')} {volume_profile.get('price_vs_poc')}")
+    if baseline_dna:
+        metrics = (baseline_dna.get("metrics") or {}).get("range", {}).get("long", {})
+        if metrics:
+            key_evidence.append(f"baseline_latest_pctl={metrics.get('latest_percentile')} z={metrics.get('z_score')}")
 
     historical_source = "not_available"
     hist_wr = "not_available"
@@ -509,6 +515,9 @@ def enrich_trade_context(trade: dict) -> dict:
         hist_wilson = edge_matrix.get("wilson_lower", "not_available")
         historical_source = "edge_matrix"
         hist_reliability = "uncalibrated" if not isinstance(hist_n, int) or hist_n < 30 else "calibrated"
+    if historical_source == "not_available" and baseline_dna:
+        historical_source = "historical_baseline_dna"
+        hist_reliability = "uncalibrated"
 
     quality_points = 0
     if isinstance(confidence, (int, float)):
@@ -524,6 +533,45 @@ def enrich_trade_context(trade: dict) -> dict:
     if source_context:
         quality_points += 1
     trade_quality_score = "strong" if quality_points >= 5 else "moderate" if quality_points >= 3 else "partial"
+
+    probability_ctx = {
+        "long_prob": (brain_out or {}).get("long_prob", (brain or {}).get("confidence")) if isinstance((brain_out or {}).get("long_prob", None), (int, float)) or isinstance((brain or {}).get("confidence"), (int, float)) else "not_available",
+        "short_prob": (brain_out or {}).get("short_prob") if isinstance((brain_out or {}).get("short_prob", None), (int, float)) else "not_available",
+        "source": "not_available",
+        "reliability": hist_reliability,
+    }
+    if probability_ctx["long_prob"] == "not_available" and isinstance(confidence, (int, float)):
+        probability_ctx["long_prob"] = confidence
+    if probability_ctx["short_prob"] == "not_available" and isinstance(probability_ctx["long_prob"], (int, float)):
+        probability_ctx["short_prob"] = round(max(0.0, 1.0 - float(probability_ctx["long_prob"])), 3)
+    if historical_source.startswith("probability_surface"):
+        probability_ctx["source"] = "probability_surface"
+    elif historical_source == "edge_matrix":
+        probability_ctx["source"] = "edge_matrix"
+    elif historical_source.startswith("calibration_profiles"):
+        probability_ctx["source"] = "calibration_profiles"
+    elif historical_source == "historical_baseline_dna":
+        probability_ctx["source"] = "historical_baseline_dna"
+
+    position_size = _pick_str(
+        (trade.get("sim") or {}).get("contracts"),
+        (trade.get("sim") or {}).get("position_usd"),
+        (trade.get("sim") or {}).get("risk_usd"),
+    )
+    market_regime = _pick_str(
+        (regime or {}).get("trend_regime"),
+        (qualified or {}).get("regime_at_qualification"),
+        (brain_out or {}).get("context", {}).get("market_regime"),
+    )
+    risk_ctx = {
+        "rr": rr_text,
+        "warning": warning,
+        "risk_usd": (trade.get("sim") or {}).get("risk_usd", "not_available"),
+        "position_size": position_size,
+        "leverage": (trade.get("sim") or {}).get("leverage_approx", "not_available"),
+        "entry_equals_sl": warning == "entry_equals_sl",
+        "invalid_sl_geometry": warning == "invalid_sl_geometry",
+    }
 
     missing = []
     if not qualified:
@@ -582,6 +630,15 @@ def enrich_trade_context(trade: dict) -> dict:
         "order_flow": {"delta": delta, "trend_1s": trend_1s, "trend_1m": trend_1m, "micro_bos": micro_bos, "gate_grade": gate_grade, "price_loc": price_loc, "poc_relation": poc_relation, "zone": zone, "dom_bias": bias_text, "cascade": cascade_risk, "session": session, "liquidity": liquidity, "atrit": atrit},
         "observer": {"state": observer_state, "event": observer_event, "reason": observer_reason, "f_gates": (obs or {}).get("f_gates") or (decision_gate or {}).get("detector_summary") or {}, "age": int((time.time() * 1000 - trade_ts) / 1000) if trade_ts else "not_available"},
         "historical_edge": {"wr": hist_wr, "n": hist_n, "wilson_lower": hist_wilson, "source": historical_source, "reliability": hist_reliability},
+        "probability": probability_ctx,
+        "calibration": {
+            "source": historical_source if historical_source != "not_available" else "uncalibrated",
+            "status": "measured" if historical_source.startswith(("probability_surface", "calibration_profiles")) else "uncalibrated",
+            "sample_count": hist_n,
+        },
+        "risk": risk_ctx,
+        "market_regime": market_regime,
+        "position_size": position_size,
         "trade_quality_score": trade_quality_score,
         "quality_points": quality_points,
         "key_evidence": key_evidence,
@@ -599,9 +656,13 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
     scenario = ctx.get("scenario_context") or {}
     observer = ctx.get("observer") or {}
     historical = ctx.get("historical_edge") or {}
+    probability = ctx.get("probability") or {}
+    calibration = ctx.get("calibration") or {}
+    risk = ctx.get("risk") or {}
+    ai_expl = ctx.get("key_evidence") or []
     quality_context = "uncalibrated" if ctx.get("trade_quality_score") == "partial" else ctx.get("confidence")
     return (
-        "🧠 NurtacCoreEngine — Trade Brain Report V3\n\n"
+        "🧠 NurtacCoreEngine — Trade Brain Report V4\n\n"
         "📌 Trade\n"
         f"Symbol: {SYMBOL}\n"
         f"Direction: {ctx['direction']}\n"
@@ -652,17 +713,37 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
         f"Wilson LB: {historical.get('wilson_lower')}\n"
         f"Source: {historical.get('source')}\n"
         f"Reliability: {historical.get('reliability')}\n\n"
+        "📊 Probability\n"
+        f"Long Prob: {probability.get('long_prob')}\n"
+        f"Short Prob: {probability.get('short_prob')}\n"
+        f"Source: {probability.get('source')}\n"
+        f"Reliability: {probability.get('reliability')}\n\n"
+        "🧾 Calibration\n"
+        f"Source: {calibration.get('source')}\n"
+        f"Status: {calibration.get('status')}\n"
+        f"Sample Count: {calibration.get('sample_count')}\n\n"
+        "🛡 Risk\n"
+        f"RR: {risk.get('rr')}\n"
+        f"Risk USD: {risk.get('risk_usd')}\n"
+        f"Position Size: {ctx.get('position_size')}\n"
+        f"Leverage: {risk.get('leverage')}\n"
+        f"Warning: {risk.get('warning')}\n\n"
         "👁 Observer\n"
         f"State: {observer.get('state')}\n"
         f"Event: {observer.get('event')}\n"
         f"F Gates: {observer.get('f_gates')}\n"
         f"Age: {observer.get('age')}\n\n"
+        "🧠 AI Explanation\n"
+        + "\n".join([f"- {x}" for x in ai_expl[:3]]) + "\n\n"
         "⭐ Trade Quality\n"
         f"Score: {ctx.get('trade_quality_score')}\n"
         f"Confidence: {quality_context if isinstance(quality_context, str) else ctx['confidence']}\n"
         f"Context: {ctx.get('context_source')}\n"
         f"Warnings: {warning_text}\n"
         f"Missing Sources: {ctx.get('missing_context_sources')}\n\n"
+        "🏷 Market Regime\n"
+        f"Regime: {ctx.get('market_regime')}\n"
+        f"Session: {ctx.get('order_flow', {}).get('session')}\n\n"
         "✅ Sonuç\n"
         f"{ctx['direction']} trade açıldı çünkü order flow, scenario ve historical edge bu kurguya destek veriyor."
     )
@@ -850,8 +931,8 @@ async def run_live() -> None:
                             _log_message("paper_open", msg, {"trade_id": trade_id, "setup_id": latest_open.get("source_setup_id") or latest_open.get("qualified_setup_id")})
                             ctx = enrich_trade_context(latest_open)
                             _write_health(
-                                version="v3",
-                                last_message_version="v3",
+                                version="v4",
+                                last_message_version="v4",
                                 last_status="sent",
                                 last_sent_trade_id=trade_id,
                                 last_seen_trade_id=trade_id,
@@ -863,11 +944,11 @@ async def run_live() -> None:
                             )
                             print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
                         else:
-                            _write_health(version="v3", last_message_version="v3", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
+                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
                     else:
-                        _write_health(version="v3", last_message_version="v3", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
+                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
             else:
-                _write_health(version="v3", last_message_version="v3", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
+                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -905,7 +986,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _write_health(version="v3", last_message_version="v3", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
+            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -921,9 +1002,9 @@ async def main() -> None:
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
     if not TELEGRAM_CONFIGURED:
-        _write_health(version="v3", last_message_version="v3", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
+        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
     else:
-        _write_health(version="v3", last_message_version="v3", last_status="waiting_new_paper_trade", configured=True)
+        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True)
 
     await run_live()
 
