@@ -475,6 +475,16 @@ def enrich_trade_context(trade: dict) -> dict:
         if metrics:
             key_evidence.append(f"baseline_latest_pctl={metrics.get('latest_percentile')} z={metrics.get('z_score')}")
 
+    def _num(v):
+        try:
+            f = float(v)
+            return f if f == f else None
+        except Exception:
+            return None
+
+    def _normalize_side(v):
+        return str(v or "").strip().lower()
+
     historical_source = "not_available"
     hist_wr = "not_available"
     hist_n = "not_available"
@@ -519,20 +529,85 @@ def enrich_trade_context(trade: dict) -> dict:
         historical_source = "historical_baseline_dna"
         hist_reliability = "uncalibrated"
 
-    quality_points = 0
-    if isinstance(confidence, (int, float)):
-        quality_points += 1
-    if observer_state == "QUALIFIED":
-        quality_points += 1
-    if scenario_name != "no_active_scenario":
-        quality_points += 1
-    if hist_wr != "not_available" and hist_n != "not_available":
-        quality_points += 1
-    if rr_text != "invalid":
-        quality_points += 1
-    if source_context:
-        quality_points += 1
-    trade_quality_score = "strong" if quality_points >= 5 else "moderate" if quality_points >= 3 else "partial"
+    brain_conf = _num(confidence)
+    brain_decision = _normalize_side((qualified or {}).get("brain_decision") or (brain or {}).get("decision") or (brain_out or {}).get("decision"))
+    brain_supported = bool(brain_conf is not None and brain_conf >= 0.55 and brain_decision in {"approved", "long", "short"})
+
+    historical_supported = False
+    historical_note = "No reliable historical sample found."
+    hist_wr_num = _num(hist_wr)
+    hist_n_num = _num(hist_n)
+    hist_wilson_num = _num(hist_wilson)
+    if hist_wr_num is not None and hist_n_num is not None:
+        if hist_wr_num == 0.0:
+            historical_note = "Historical edge does not support this setup yet."
+        elif hist_n_num < 30:
+            historical_note = "Low sample size."
+            hist_reliability = "low_sample"
+        elif hist_wr_num > 0.50 and hist_reliability == "calibrated" and (hist_wilson_num is None or hist_wilson_num > 0.0):
+            historical_supported = True
+            historical_note = "Historical edge supports this setup."
+        else:
+            historical_note = "Historical edge is weak or uncalibrated."
+    elif hist_wr == "not_available" or hist_n == "not_available":
+        historical_note = "No reliable historical sample found."
+
+    scenario_count_num = _num(scenario_count) or 0.0
+    scenario_supported = bool(
+        scenario_name not in {"no_active_scenario", "not_available"}
+        and scenario_direction not in {"neutral", "not_available", ""}
+        and scenario_count_num > 0
+    )
+    scenario_note = "No active scenario confirmed." if scenario_name == "no_active_scenario" else ("Scenario active." if scenario_supported else "Scenario context is unconfirmed.")
+
+    delta_l = _normalize_side(delta)
+    trend_1m_l = _normalize_side(trend_1m)
+    gate_grade_l = _normalize_side(gate_grade)
+    price_loc_l = _normalize_side(price_loc)
+    bias_l = _normalize_side(bias_text)
+    cascade_l = _normalize_side(cascade_risk)
+    atrit_l = _normalize_side(atrit)
+    dominant_side_l = _normalize_side((evidence or {}).get("dominant_side"))
+    orderflow_support_count = 0
+    if direction.lower() == "short":
+        if delta_l.startswith("-") or delta_l in {"negative", "bearish", "short"}:
+            orderflow_support_count += 1
+        if trend_1m_l in {"downtrend", "bearish"}:
+            orderflow_support_count += 1
+        if gate_grade_l in {"a", "b", "a+", "b+", "premium", "strong"}:
+            orderflow_support_count += 1
+        if price_loc_l in {"premium", "above_poc", "supply", "fvg"}:
+            orderflow_support_count += 1
+        if bias_l in {"short", "bearish", "neutral"}:
+            orderflow_support_count += 1
+        if cascade_l in {"short", "bearish", "high"}:
+            orderflow_support_count += 1
+        if atrit_l in {"sell", "bearish", "short", "initiative", "trap"}:
+            orderflow_support_count += 1
+    elif direction.lower() == "long":
+        if delta_l.startswith("+") or delta_l in {"positive", "bullish", "long"}:
+            orderflow_support_count += 1
+        if trend_1m_l in {"uptrend", "bullish"}:
+            orderflow_support_count += 1
+        if gate_grade_l in {"a", "b", "a+", "b+", "premium", "strong"}:
+            orderflow_support_count += 1
+        if price_loc_l in {"discount", "below_poc", "demand", "fvg"}:
+            orderflow_support_count += 1
+        if bias_l in {"long", "bullish", "neutral"}:
+            orderflow_support_count += 1
+        if cascade_l in {"long", "bullish", "high"}:
+            orderflow_support_count += 1
+        if atrit_l in {"buy", "bullish", "long", "initiative", "trap"}:
+            orderflow_support_count += 1
+    if dominant_side_l in {"short", "bearish"} and direction.lower() == "short":
+        orderflow_support_count -= 1
+    if dominant_side_l in {"long", "bullish"} and direction.lower() == "long":
+        orderflow_support_count -= 1
+    orderflow_supported = orderflow_support_count >= 2
+    if dominant_side_l and direction.lower() in {"short", "long"} and dominant_side_l not in {direction.lower(), "neutral"}:
+        key_evidence.append(f"dominant_side_conflict={dominant_side_l}")
+
+    observer_supported = observer_state == "QUALIFIED"
 
     probability_ctx = {
         "long_prob": (brain_out or {}).get("long_prob", (brain or {}).get("confidence")) if isinstance((brain_out or {}).get("long_prob", None), (int, float)) or isinstance((brain or {}).get("confidence"), (int, float)) else "not_available",
@@ -572,6 +647,37 @@ def enrich_trade_context(trade: dict) -> dict:
         "entry_equals_sl": warning == "entry_equals_sl",
         "invalid_sl_geometry": warning == "invalid_sl_geometry",
     }
+
+    risk_supported = bool(
+        _num(rr_text) is not None
+        and float(rr_text) >= 1.0
+        and warning == "none"
+        and not risk_ctx.get("entry_equals_sl")
+        and not risk_ctx.get("invalid_sl_geometry")
+    )
+
+    support_flags = {
+        "brain_supported": brain_supported,
+        "observer_supported": observer_supported,
+        "risk_supported": risk_supported,
+        "orderflow_supported": orderflow_supported,
+        "scenario_supported": scenario_supported,
+        "historical_supported": historical_supported,
+    }
+    support_count = sum(1 for v in support_flags.values() if v)
+    if support_count >= 5 and (historical_supported or scenario_supported):
+        trade_quality_score = "strong"
+    elif support_count >= 3:
+        trade_quality_score = "moderate"
+    else:
+        trade_quality_score = "partial"
+    honesty_warnings = []
+    if not scenario_supported and not historical_supported:
+        honesty_warnings.append("uncalibrated_no_scenario_no_historical_edge")
+    if not historical_supported:
+        honesty_warnings.append("historical_edge_not_supportive")
+    if not scenario_supported:
+        honesty_warnings.append("scenario_not_active")
 
     missing = []
     if not qualified:
@@ -640,14 +746,39 @@ def enrich_trade_context(trade: dict) -> dict:
         "market_regime": market_regime,
         "position_size": position_size,
         "trade_quality_score": trade_quality_score,
-        "quality_points": quality_points,
+        "quality_points": support_count,
+        "support_flags": support_flags,
+        "support_count": support_count,
         "key_evidence": key_evidence,
         "context_source": context_source,
         "missing_context_sources": missing,
-        "warnings": [warning] if warning != "none" else [],
+        "warnings": ([warning] if warning != "none" else []) + honesty_warnings,
+        "historical_supported": historical_supported,
+        "scenario_supported": scenario_supported,
+        "orderflow_supported": orderflow_supported,
+        "observer_supported": observer_supported,
+        "risk_supported": risk_supported,
+        "brain_supported": brain_supported,
+        "historical_note": historical_note,
+        "scenario_note": scenario_note,
     }
 
 def format_v3_message(trade: dict, ctx: dict) -> str:
+    def _historical_support_label(h: dict, supported: bool) -> str:
+        wr = h.get("wr")
+        n = h.get("n")
+        try:
+            n_num = float(n)
+        except Exception:
+            n_num = None
+        if supported:
+            return "YES"
+        if wr == "not_available" or n == "not_available":
+            return "UNKNOWN"
+        if n_num is not None and n_num < 30:
+            return "WEAK"
+        return "NO"
+
     warning_text = ", ".join(ctx.get("warnings") or []) if ctx.get("warnings") else "none"
     if ctx["rr_text"] == "invalid" and warning_text == "none":
         warning_text = "missing_rr_inputs"
@@ -661,6 +792,34 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
     risk = ctx.get("risk") or {}
     ai_expl = ctx.get("key_evidence") or []
     quality_context = "uncalibrated" if ctx.get("trade_quality_score") == "partial" else ctx.get("confidence")
+    historical_supported = bool(ctx.get("historical_supported"))
+    scenario_supported = bool(ctx.get("scenario_supported"))
+    orderflow_supported = bool(ctx.get("orderflow_supported"))
+    observer_supported = bool(ctx.get("observer_supported"))
+    risk_supported = bool(ctx.get("risk_supported"))
+    brain_supported = bool(ctx.get("brain_supported"))
+
+    historical_note = ctx.get("historical_note") or "No reliable historical sample found."
+    scenario_note = ctx.get("scenario_note") or "Scenario context is unconfirmed."
+    result_lines = []
+    if observer_supported:
+        result_lines.append("Observer QUALIFIED.")
+    if risk_supported:
+        result_lines.append("Risk valid.")
+    if orderflow_supported:
+        result_lines.append("Order flow is partly aligned.")
+    if scenario_supported:
+        result_lines.append("Scenario is active.")
+    else:
+        result_lines.append("Scenario desteği yok.")
+    if not historical_supported:
+        result_lines.append("Historical edge this setup is not yet supporting / uncalibrated.")
+    else:
+        result_lines.append("Historical edge supports this setup.")
+    if not any([brain_supported, observer_supported, risk_supported, orderflow_supported, scenario_supported, historical_supported]):
+        result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
+    elif not historical_supported and not scenario_supported:
+        result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
     return (
         "🧠 NurtacCoreEngine — Trade Brain Report V4\n\n"
         "📌 Trade\n"
@@ -713,6 +872,8 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
         f"Wilson LB: {historical.get('wilson_lower')}\n"
         f"Source: {historical.get('source')}\n"
         f"Reliability: {historical.get('reliability')}\n\n"
+        f"Support: {_historical_support_label(historical, historical_supported)}\n"
+        f"Note: {historical_note}\n\n"
         "📊 Probability\n"
         f"Long Prob: {probability.get('long_prob')}\n"
         f"Short Prob: {probability.get('short_prob')}\n"
@@ -745,7 +906,7 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
         f"Regime: {ctx.get('market_regime')}\n"
         f"Session: {ctx.get('order_flow', {}).get('session')}\n\n"
         "✅ Sonuç\n"
-        f"{ctx['direction']} trade açıldı çünkü order flow, scenario ve historical edge bu kurguya destek veriyor."
+        + "\n".join(result_lines)
     )
 
 def _join_context(trade: dict) -> dict:
@@ -941,14 +1102,18 @@ async def run_live() -> None:
                                 missing_context_sources=ctx.get("missing_context_sources", []),
                                 last_quality_score=ctx.get("trade_quality_score", "partial"),
                                 warnings=ctx.get("warnings", []),
+                                honesty_version="v4_truth_audit",
+                                support_flags=ctx.get("support_flags", {}),
+                                support_count=ctx.get("support_count", 0),
+                                message_honesty="honest",
                             )
                             print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
                         else:
-                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
+                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest")
                     else:
-                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
+                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest")
             else:
-                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
+                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0, honesty_version="v4_truth_audit", message_honesty="honest")
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -986,7 +1151,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
+            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e), honesty_version="v4_truth_audit", message_honesty="honest")
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -1002,9 +1167,9 @@ async def main() -> None:
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
     if not TELEGRAM_CONFIGURED:
-        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
+        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False, honesty_version="v4_truth_audit", message_honesty="honest")
     else:
-        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True)
+        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True, honesty_version="v4_truth_audit", message_honesty="honest")
 
     await run_live()
 
