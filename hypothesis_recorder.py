@@ -74,8 +74,16 @@ def _append_jsonl(path: Path, record: dict) -> None:
 
 def _load_cursors() -> dict:
     try:
-        if CURSOR_FILE.exists():
-            return json.loads(CURSOR_FILE.read_text())
+        raw_cursors = json.loads(CURSOR_FILE.read_text()) if CURSOR_FILE.exists() else {}
+        cursors = {}
+        for det, pos in raw_cursors.items():
+            fpath = DATA_DIR / f"labels_{det}.jsonl"
+            max_pos = fpath.stat().st_size if fpath.exists() else 0
+            try:
+                cursors[det] = min(int(pos), int(max_pos))
+            except Exception:
+                cursors[det] = 0
+        return cursors
     except Exception:
         pass
     return {}
