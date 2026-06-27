@@ -19,4 +19,8 @@ echo "--- trade_outcome_explanations ---"
 .venv/bin/python3 tools/trade_outcome_explanation_engine.py 2>/dev/null || echo "SKIP: not ready"
 free -h | grep Mem
 
+echo "--- probability_surface ---"
+.venv/bin/python3 tools/probability_surface_engine.py 2>/dev/null || echo "SKIP: not ready"
+free -h | grep Mem
+
 echo "=== BATCH DONE ===" && free -h | grep Mem
