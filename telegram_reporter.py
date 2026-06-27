@@ -677,7 +677,7 @@ def enrich_trade_context(trade: dict) -> dict:
         "historical_supported": historical_supported,
     }
     support_count = sum(1 for v in support_flags.values() if v)
-    if support_count >= 5 and (historical_supported or scenario_supported):
+    if support_count >= 5:
         trade_quality_score = "strong"
     elif support_count >= 3:
         trade_quality_score = "moderate"
@@ -785,6 +785,8 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
             n_num = None
         if supported:
             return "YES"
+        if wr in {0, 0.0, "0", "0.0"}:
+            return "NO"
         if wr == "not_available" or n == "not_available":
             return "UNKNOWN"
         if n_num is not None and n_num < 30:
@@ -813,25 +815,26 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
 
     historical_note = ctx.get("historical_note") or "No reliable historical sample found."
     scenario_note = ctx.get("scenario_note") or "Scenario context is unconfirmed."
-    result_lines = []
+
+    result_reasons = []
+    if brain_supported:
+        result_reasons.append("Trade Brain yön verdi")
     if observer_supported:
-        result_lines.append("Observer QUALIFIED.")
+        result_reasons.append("Observer QUALIFIED yaptı")
     if risk_supported:
-        result_lines.append("Risk valid.")
+        result_reasons.append("risk yapısı geçerli")
     if orderflow_supported:
-        result_lines.append("Order flow is partly aligned.")
+        result_reasons.append("order flow destekledi")
     if scenario_supported:
-        result_lines.append("Scenario is active.")
+        result_reasons.append("scenario destekledi")
     else:
-        result_lines.append("Scenario desteği yok.")
-    if not historical_supported:
-        result_lines.append("Historical edge this setup is not yet supporting / uncalibrated.")
+        result_reasons.append("Scenario desteği yok")
+    if historical_supported:
+        result_reasons.append("historical edge destekledi")
     else:
-        result_lines.append("Historical edge supports this setup.")
+        result_reasons.append("Historical edge henüz desteklemiyor")
     if not any([brain_supported, observer_supported, risk_supported, orderflow_supported, scenario_supported, historical_supported]):
-        result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
-    elif not historical_supported and not scenario_supported:
-        result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
+        result_reasons = ["destek sinyali yetersiz"]
     setup_display = _safe_value(ctx.get("qualified_setup_id"), ctx.get("setup_id"))
     explanation_lines = (ctx.get("key_evidence") or [])[:3]
     explanation_lines = explanation_lines or ["not_available"]
@@ -839,6 +842,8 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
     scenario_active = scenario.get("active_scenarios") if scenario.get("active_scenarios") else "no_active_scenario"
     support_label = _historical_support_label(historical, historical_supported)
     trade_quality = _safe_value(ctx.get("trade_quality_score"), "partial")
+    scenario_support_label = "YES" if scenario_supported else "NO"
+    scenario_status_display = "no_active_scenario" if _safe_value(scenario.get('dominant'), 'no_active_scenario') == "no_active_scenario" else _safe_value(scenario.get('status'))
     contract_lines = [
         "📌 Trade",
         f"Symbol: {_safe_value(SYMBOL)}",
@@ -878,7 +883,8 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
         "🎯 Scenario",
         f"Dominant: {_safe_value(scenario.get('dominant'), 'no_active_scenario')}",
         f"Direction: {_safe_value(scenario.get('direction'))}",
-        f"Status: {_safe_value(scenario.get('status'))}",
+        f"Status: {scenario_status_display}",
+        f"Support: {scenario_support_label}",
         f"Score: {_safe_value(scenario.get('score'))}",
         f"Active Count: {_safe_value(scenario.get('active_count'))}",
         f"Active Scenarios: {_safe_value(scenario_active, 'no_active_scenario')}",
@@ -904,7 +910,7 @@ def format_trade_message_contract(trade: dict, ctx: dict) -> str:
         f"Warnings: {_safe_value(warning_text)}",
         "",
         "✅ Sonuç",
-        f"{_safe_value(ctx['direction']).upper()} trade açıldı çünkü: " + "; ".join([x for x in result_lines if x]),
+        f"{_safe_value(ctx['direction']).upper()} trade açıldı çünkü: " + "; ".join([x for x in result_reasons if x]),
     ]
     return "\n".join(contract_lines)
 
