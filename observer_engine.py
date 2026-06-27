@@ -750,7 +750,7 @@ class ObservedSetup:
         f_session = session not in bad_sessions or self.setup_type in ["REVERSAL", "RECLAIM"]
         f_timing = self.entry_timing not in ("extended",)
         if self.direction == "long":
-            macro_ctx = (bias or {})
+            macro_ctx = {"dominant_bias": dom_bias}
             macro_bullish = macro_ctx.get("dominant_bias") == "long"
             trend_1m_up = ((s1m or {}).get("trend", {}).get("direction") == "uptrend")
             f1 = (delta > 0) or (macro_bullish and trend_1m_up)
@@ -761,7 +761,7 @@ class ObservedSetup:
             f4 = dom_scen_dir in ("bullish", "neutral")
             f5 = dom_bias in ("long", "neutral")
         else:
-            macro_ctx = (bias or {})
+            macro_ctx = {"dominant_bias": dom_bias}
             macro_bearish = macro_ctx.get("dominant_bias") == "short"
             trend_1m_down = ((s1m or {}).get("trend", {}).get("direction") == "downtrend")
             f1 = (delta < 0) or (macro_bearish and trend_1m_down)
