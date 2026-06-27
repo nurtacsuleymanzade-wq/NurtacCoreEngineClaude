@@ -201,14 +201,19 @@ def _session(ts_ms: int) -> str:
 
 
 def _compatible_setups(regime: str, session: str) -> list[str]:
+    # regime bilinmiyorsa kısıtlama yok — tüm setup_type'lara izin ver
+    if not regime or regime not in REGIME_SETUP_COMPAT:
+        return []
     regime_setups = REGIME_SETUP_COMPAT.get(regime, [])
     session_families = SESSION_SETUP_COMPAT.get(session, [])
     if not session_families:
         return []
-    return [
+    matched = [
         setup for setup in regime_setups
         if any(family in setup for family in session_families)
     ]
+    # Eşleşme yoksa da kısıtlama yok
+    return matched if matched else []
 
 
 def build_context(ts_ms: int) -> dict:
