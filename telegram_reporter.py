@@ -232,6 +232,8 @@ def _write_health(**payload) -> None:
         "context_enrichment": "missing",
         "missing_context_sources": [],
         "last_message_version": "v4",
+        "format_contract": "telegram_trade_message_v1",
+        "last_message_sections": ["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
         "last_quality_score": "partial",
         "warnings": [],
     }
@@ -252,6 +254,16 @@ def _pick_dict(*values) -> dict:
         if isinstance(value, dict) and value:
             return value
     return {}
+
+def _safe_value(value, fallback="not_available"):
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text in {"?", "None", "none", "null", "NaN"}:
+            return fallback
+        return text
+    return value
 
 def _safe_ts(value) -> int | None:
     try:
@@ -763,7 +775,7 @@ def enrich_trade_context(trade: dict) -> dict:
         "scenario_note": scenario_note,
     }
 
-def format_v3_message(trade: dict, ctx: dict) -> str:
+def format_trade_message_contract(trade: dict, ctx: dict) -> str:
     def _historical_support_label(h: dict, supported: bool) -> str:
         wr = h.get("wr")
         n = h.get("n")
@@ -820,94 +832,81 @@ def format_v3_message(trade: dict, ctx: dict) -> str:
         result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
     elif not historical_supported and not scenario_supported:
         result_lines.append("This trade was opened by the technical pipeline; edge is limited/uncalibrated.")
-    return (
-        "🧠 NurtacCoreEngine — Trade Brain Report V4\n\n"
-        "📌 Trade\n"
-        f"Symbol: {SYMBOL}\n"
-        f"Direction: {ctx['direction']}\n"
-        f"Entry: {ctx['entry']:.2f}\n"
-        f"SL: {ctx['sl']:.2f}\n"
-        f"TP1: {ctx['tp1']:.2f}\n"
-        f"TP2: {ctx['tp2']:.2f}\n"
-        f"TP3: {ctx['tp3']:.2f}\n"
-        f"RR: {ctx['rr_text']}\n"
-        f"Setup ID: {ctx['qualified_setup_id'] if ctx['qualified_setup_id'] != 'not_available' else ctx['setup_id']}\n"
-        f"Trade ID: {ctx['trade_id']}\n"
-        f"Time UTC: {time_text}\n\n"
-        "🧠 Trade Brain\n"
-        f"Decision: {ctx['decision']}\n"
-        f"Confidence: {ctx['confidence']}\n"
-        f"Q9: {ctx['q9_reason']}\n"
-        "Explanation:\n"
-        f"- {ctx['decision']}\n"
-        f"- {ctx['q9_reason']}\n"
-        f"- {ctx['observer']['state']}\n\n"
-        "📊 Order Flow\n"
-        f"Delta: {ctx['order_flow']['delta']}\n"
-        f"Trend 1S: {ctx['order_flow']['trend_1s']}\n"
-        f"Trend 1M: {ctx['order_flow']['trend_1m']}\n"
-        f"Micro BOS: {ctx['order_flow']['micro_bos']}\n"
-        f"Gate: {ctx['order_flow']['gate_grade']}\n"
-        f"Price Location: {ctx['order_flow']['price_loc']}\n"
-        f"POC: {ctx['order_flow']['poc_relation']}\n"
-        f"Zone: {ctx['order_flow']['zone']}\n"
-        f"Bias: {ctx['order_flow']['dom_bias']}\n"
-        f"Cascade Risk: {ctx['order_flow']['cascade']}\n"
-        f"Session: {ctx['order_flow']['session']}\n"
-        f"Liquidity: {ctx['order_flow']['liquidity']}\n"
-        f"Absorption/Initiative/Trap: {ctx['order_flow']['atrit']}\n"
-        "Key Evidence:\n"
-        + "\n".join([f"- {x}" for x in (ctx.get("key_evidence") or [])[:3]]) + "\n\n"
-        "🎯 Scenario\n"
-        f"Dominant: {scenario.get('dominant')}\n"
-        f"Direction: {scenario.get('direction')}\n"
-        f"Status: {scenario.get('status')}\n"
-        f"Score: {scenario.get('score')}\n"
-        f"Active Count: {scenario.get('active_count')}\n"
-        f"Active Scenarios: {scenario.get('active_scenarios') if scenario.get('active_scenarios') else 'no_active_scenario'}\n"
-        f"Q9: {scenario.get('q9')}\n\n"
-        "📈 Historical Edge\n"
-        f"WR: {historical.get('wr')}\n"
-        f"N: {historical.get('n')}\n"
-        f"Wilson LB: {historical.get('wilson_lower')}\n"
-        f"Source: {historical.get('source')}\n"
-        f"Reliability: {historical.get('reliability')}\n\n"
-        f"Support: {_historical_support_label(historical, historical_supported)}\n"
-        f"Note: {historical_note}\n\n"
-        "📊 Probability\n"
-        f"Long Prob: {probability.get('long_prob')}\n"
-        f"Short Prob: {probability.get('short_prob')}\n"
-        f"Source: {probability.get('source')}\n"
-        f"Reliability: {probability.get('reliability')}\n\n"
-        "🧾 Calibration\n"
-        f"Source: {calibration.get('source')}\n"
-        f"Status: {calibration.get('status')}\n"
-        f"Sample Count: {calibration.get('sample_count')}\n\n"
-        "🛡 Risk\n"
-        f"RR: {risk.get('rr')}\n"
-        f"Risk USD: {risk.get('risk_usd')}\n"
-        f"Position Size: {ctx.get('position_size')}\n"
-        f"Leverage: {risk.get('leverage')}\n"
-        f"Warning: {risk.get('warning')}\n\n"
-        "👁 Observer\n"
-        f"State: {observer.get('state')}\n"
-        f"Event: {observer.get('event')}\n"
-        f"F Gates: {observer.get('f_gates')}\n"
-        f"Age: {observer.get('age')}\n\n"
-        "🧠 AI Explanation\n"
-        + "\n".join([f"- {x}" for x in ai_expl[:3]]) + "\n\n"
-        "⭐ Trade Quality\n"
-        f"Score: {ctx.get('trade_quality_score')}\n"
-        f"Confidence: {quality_context if isinstance(quality_context, str) else ctx['confidence']}\n"
-        f"Context: {ctx.get('context_source')}\n"
-        f"Warnings: {warning_text}\n"
-        f"Missing Sources: {ctx.get('missing_context_sources')}\n\n"
-        "🏷 Market Regime\n"
-        f"Regime: {ctx.get('market_regime')}\n"
-        f"Session: {ctx.get('order_flow', {}).get('session')}\n\n"
-        "✅ Sonuç\n"
-        + "\n".join(result_lines)
-    )
+    setup_display = _safe_value(ctx.get("qualified_setup_id"), ctx.get("setup_id"))
+    explanation_lines = (ctx.get("key_evidence") or [])[:3]
+    explanation_lines = explanation_lines or ["not_available"]
+    key_evidence_lines = (ctx.get("key_evidence") or [])[:3] or ["not_available"]
+    scenario_active = scenario.get("active_scenarios") if scenario.get("active_scenarios") else "no_active_scenario"
+    support_label = _historical_support_label(historical, historical_supported)
+    trade_quality = _safe_value(ctx.get("trade_quality_score"), "partial")
+    contract_lines = [
+        "📌 Trade",
+        f"Symbol: {_safe_value(SYMBOL)}",
+        f"Direction: {_safe_value(ctx['direction']).upper()}",
+        f"Entry: {ctx['entry']:.2f}",
+        f"SL: {ctx['sl']:.2f}",
+        f"TP1: {ctx['tp1']:.2f}",
+        f"TP2: {ctx['tp2']:.2f}",
+        f"TP3: {ctx['tp3']:.2f}",
+        f"RR: {_safe_value(ctx['rr_text'])}",
+        f"Setup ID: {setup_display}",
+        f"Trade ID: {_safe_value(ctx['trade_id'])}",
+        f"Time UTC: {time_text}",
+        "",
+        "🧠 Trade Brain",
+        f"Decision: {_safe_value(ctx['decision'])}",
+        f"Confidence: {_safe_value(ctx['confidence'])}",
+        f"Q9: {_safe_value(ctx['q9_reason'])}",
+        "Explanation:",
+        *[f"- {_safe_value(x)}" for x in explanation_lines[:3]],
+        "",
+        "📊 Order Flow",
+        f"Delta: {_safe_value(ctx['order_flow']['delta'])}",
+        f"Trend 1S: {_safe_value(ctx['order_flow']['trend_1s'])}",
+        f"Trend 1M: {_safe_value(ctx['order_flow']['trend_1m'])}",
+        f"Micro BOS: {_safe_value(ctx['order_flow']['micro_bos'])}",
+        f"Gate: {_safe_value(ctx['order_flow']['gate_grade'])}",
+        f"Price Location: {_safe_value(ctx['order_flow']['price_loc'])}",
+        f"POC: {_safe_value(ctx['order_flow']['poc_relation'])}",
+        f"Zone: {_safe_value(ctx['order_flow']['zone'])}",
+        f"Bias: {_safe_value(ctx['order_flow']['dom_bias'])}",
+        f"Cascade Risk: {_safe_value(ctx['order_flow']['cascade'])}",
+        f"Session: {_safe_value(ctx['order_flow']['session'])}",
+        "Key Evidence:",
+        *[f"- {_safe_value(x)}" for x in key_evidence_lines[:3]],
+        "",
+        "🎯 Scenario",
+        f"Dominant: {_safe_value(scenario.get('dominant'), 'no_active_scenario')}",
+        f"Direction: {_safe_value(scenario.get('direction'))}",
+        f"Status: {_safe_value(scenario.get('status'))}",
+        f"Score: {_safe_value(scenario.get('score'))}",
+        f"Active Count: {_safe_value(scenario.get('active_count'))}",
+        f"Active Scenarios: {_safe_value(scenario_active, 'no_active_scenario')}",
+        "",
+        "📈 Historical Edge",
+        f"WR: {_safe_value(historical.get('wr'))}",
+        f"N: {_safe_value(historical.get('n'))}",
+        f"Wilson LB: {_safe_value(historical.get('wilson_lower'))}",
+        f"Source: {_safe_value(historical.get('source'))}",
+        f"Reliability: {_safe_value(historical.get('reliability'))}",
+        f"Support: {support_label}",
+        f"Note: {_safe_value(historical_note)}",
+        "",
+        "👁 Observer",
+        f"State: {_safe_value(observer.get('state'))}",
+        f"Event: {_safe_value(observer.get('event'))}",
+        f"F Gates: {_safe_value(observer.get('f_gates'))}",
+        f"Age: {_safe_value(observer.get('age'))}",
+        "",
+        "⭐ Trade Quality",
+        f"Score: {trade_quality}",
+        f"Context: {_safe_value(ctx.get('context_source'))}",
+        f"Warnings: {_safe_value(warning_text)}",
+        "",
+        "✅ Sonuç",
+        f"{_safe_value(ctx['direction']).upper()} trade açıldı çünkü: " + "; ".join([x for x in result_lines if x]),
+    ]
+    return "\n".join(contract_lines)
 
 def _join_context(trade: dict) -> dict:
     return enrich_trade_context(trade)
@@ -918,7 +917,7 @@ def _paper_open_to_message(trade: dict) -> str | None:
         return None
     if ctx["entry"] <= 0 or ctx["sl"] <= 0 or ctx["tp1"] <= 0:
         return None
-    return format_v3_message(trade, ctx)
+    return format_trade_message_contract(trade, ctx)
 
 # ── Signal Message ─────────────────────────────────────────────────────────────
 def format_setup_message(setup: dict) -> str:
@@ -1106,14 +1105,16 @@ async def run_live() -> None:
                                 support_flags=ctx.get("support_flags", {}),
                                 support_count=ctx.get("support_count", 0),
                                 message_honesty="honest",
+                                format_contract="telegram_trade_message_v1",
+                                last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"],
                             )
                             print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
                         else:
-                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest")
+                            _write_health(version="v4", last_message_version="v4", last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
                     else:
-                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest")
+                        _write_health(version="v4", last_message_version="v4", last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
             else:
-                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0, honesty_version="v4_truth_audit", message_honesty="honest")
+                _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -1151,7 +1152,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e), honesty_version="v4_truth_audit", message_honesty="honest")
+            _write_health(version="v4", last_message_version="v4", last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e), honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -1167,9 +1168,9 @@ async def main() -> None:
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
     if not TELEGRAM_CONFIGURED:
-        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False, honesty_version="v4_truth_audit", message_honesty="honest")
+        _write_health(version="v4", last_message_version="v4", last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
     else:
-        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True, honesty_version="v4_truth_audit", message_honesty="honest")
+        _write_health(version="v4", last_message_version="v4", last_status="waiting_new_paper_trade", configured=True, honesty_version="v4_truth_audit", message_honesty="honest", format_contract="telegram_trade_message_v1", last_message_sections=["Trade", "Trade Brain", "Order Flow", "Scenario", "Historical Edge", "Observer", "Trade Quality", "Sonuç"])
 
     await run_live()
 
