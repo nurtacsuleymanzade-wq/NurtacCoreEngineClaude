@@ -620,9 +620,8 @@ class ObservedSetup:
                          (self.direction == "short" and cur_price < tgt))
                 if broke:
                     vol_ok = mean_vol <= 0 or total_vol >= mean_vol * VOLUME_BOOST
-                    bos_ok = ((self.direction == "long" and micro_bos == "bullish") or
-                              (self.direction == "short" and micro_bos == "bearish"))
-                    if vol_ok and bos_ok:
+                    # BOS koşulu kaldırıldı — F kapıları zaten yön/bias/delta filtreler
+                    if vol_ok:
                         events.append(("BREAKOUT_CONFIRMED",
                                        f"close={cur_price:.2f} tgt={tgt:.2f} "
                                        f"vol={total_vol:.4f}"))
@@ -632,7 +631,7 @@ class ObservedSetup:
                     else:
                         events.append(("BREAKOUT_WEAK",
                                        f"close={cur_price:.2f} tgt={tgt:.2f} "
-                                       f"vol_ok={vol_ok} bos_ok={bos_ok}"))
+                                       f"vol_ok={vol_ok} bos_ok=removed"))
 
         elif self.breakout_confirmed:
             self.post_breakout_bars += 1
