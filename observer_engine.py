@@ -62,7 +62,7 @@ MAX_OPEN_SETUPS       = 20
 SETUP_LIFETIME_MS     = 300_000   # 5 min
 WAITING_TIMEOUT_MS    = 120_000   # 2 min - setup olgunlassin
 DEVELOPING_TIMEOUT_MS = 120_000   # 2 min
-VOLUME_BOOST          = 1.3
+VOLUME_BOOST          = 0.5
 ATR_TOUCH_FACTOR      = 0.1       # ATR * 0.1 = touch range for HOLD
 LIVE_CACHE_MAX        = 120
 MIN_BRAIN_SOFT_CONFIRMATIONS = 2
