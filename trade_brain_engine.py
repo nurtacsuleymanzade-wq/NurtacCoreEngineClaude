@@ -360,6 +360,19 @@ def main() -> None:
     print(f"[TB] MIN_CONFIDENCE={MIN_CONFIDENCE} COOLDOWN={COOLDOWN_S}s", flush=True)
 
     last_emit = {"long": 0, "short": 0}
+    try:
+        if BRAIN_SETUPS.exists():
+            for line in BRAIN_SETUPS.read_text().splitlines()[-20:]:
+                try:
+                    r = json.loads(line)
+                    d = r.get("direction")
+                    ts_ms = int(r.get("window_start_ts", 0) or 0)
+                    if d in last_emit and ts_ms > last_emit[d]:
+                        last_emit[d] = ts_ms
+                except Exception:
+                    pass
+    except Exception:
+        pass
     last_print = 0
 
     while True:
