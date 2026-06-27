@@ -105,6 +105,11 @@ def _as_list(value):
     return [value]
 
 
+def _join_preview(items, limit=8):
+    items = list(items or [])
+    return items[:limit]
+
+
 def _load_latest_calibration() -> dict:
     raw = _read_json(DATA / "calibration_profiles.json")
     overall = raw.get("overall") or {}
@@ -137,40 +142,12 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
     score_gap = abs(long_score - short_score)
     confidence = final_score
 
-    # Evidence breakdown map
-    score_breakdown = _as_list((ev.get("score_breakdown") or {}))
     sb = ev.get("score_breakdown") or {}
-    long_components = {
-        "candle_dna_long": _sf(sb.get("candle_dna_long")),
-        "gate_long": _sf(sb.get("gate_long")),
-        "smart_money_long": _sf(sb.get("smart_money_long")),
-        "detector_long": _sf(sb.get("detector_long")),
-        "baseline_long": _sf(sb.get("baseline_long")),
-        "market_context_long": _sf(sb.get("market_context_long")),
-        "volume_profile_long": _sf(sb.get("volume_profile_long")),
-        "scenario_long": _sf(sb.get("scenario_long")),
-        "macro": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("long_contribution")),
-        "whale": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("whale_pressure") == "buy"),
-        "etf": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("etf_signal") == "BULLISH"),
-        "coinbase_premium": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("coinbase_signal") in ("POSITIVE", "BULLISH")),
-        "liquidation_magnet": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("liq_magnet_above")),
-    }
-    short_components = {
-        "candle_dna_short": _sf(sb.get("candle_dna_short")),
-        "gate_short": _sf(sb.get("gate_short")),
-        "smart_money_short": _sf(sb.get("smart_money_short")),
-        "detector_short": _sf(sb.get("detector_short")),
-        "baseline_short": _sf(sb.get("baseline_short")),
-        "market_context_short": _sf(sb.get("market_context_short")),
-        "volume_profile_short": _sf(sb.get("volume_profile_short")),
-        "scenario_short": _sf(sb.get("scenario_short")),
-        "macro": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("short_contribution")),
-        "whale": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("whale_pressure") == "sell"),
-        "etf": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("etf_signal") == "BEARISH"),
-        "coinbase_premium": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("coinbase_signal") == "NEGATIVE"),
-        "liquidation_magnet": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("liq_magnet_below")),
-    }
-
+    evidence_components = ev.get("evidence_components") or {}
+    candle_dna = evidence_components.get("candle_dna") or {}
+    liquid_ctx = evidence_components.get("liquidation_context") or {}
+    macro_ctx = evidence_components.get("macro_context") or {}
+    baseline_ctx = evidence_components.get("baseline") or {}
     supporting = []
     opposing = []
     neutral = []
@@ -178,29 +155,158 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
     warnings = []
     missing_sources = []
 
+    def _side_from_key(key: str) -> str:
+        k = str(key).lower()
+        if "_counter_long" in k:
+            return "short"
+        if "_counter_short" in k:
+            return "long"
+        if "liq_magnet_short" in k or "macro_genuine_bear" in k or "etf_outflow_short" in k or "coinbase_premium_short" in k:
+            return "short"
+        if "whale_pressure_long" in k or "ob_imbalance_long" in k:
+            return "long"
+        if "_long" in k:
+            return "long"
+        if "_short" in k or "bear" in k:
+            return "short"
+        return "neutral"
+
+    def _add_factor(target, text):
+        if text not in target:
+            target.append(text)
+
+    def analyze_score_breakdown(score_breakdown, decision):
+        support, oppose, neutral_local, contradiction_local = [], [], [], []
+        pairs = [
+            ("candle_dna", "candle_dna_long", "candle_dna_short"),
+            ("gate", "gate_long", "gate_short"),
+            ("smart_money", "smart_money_long", "smart_money_short"),
+            ("detector", "detector_long", "detector_short"),
+            ("baseline", "baseline_long", "baseline_short"),
+            ("market_context", "market_context_long", "market_context_short"),
+            ("volume_profile", "volume_profile_long", "volume_profile_short"),
+            ("scenario", "scenario_long", "scenario_short"),
+        ]
+        for name, l_key, s_key in pairs:
+            l_val = _sf(score_breakdown.get(l_key))
+            s_val = _sf(score_breakdown.get(s_key))
+            if l_val == 0 and s_val == 0:
+                neutral_local.append(f"{name}_neutral")
+                continue
+            if decision == "long":
+                if l_val > s_val:
+                    support.append(f"{name}_supports_long +{l_val:g} vs +{s_val:g}")
+                elif s_val > l_val:
+                    oppose.append(f"{name}_opposes_long short_score +{s_val:g} > long_score +{l_val:g}")
+                else:
+                    neutral_local.append(f"{name}_neutral")
+            elif decision == "short":
+                if s_val > l_val:
+                    support.append(f"{name}_supports_short +{s_val:g} vs +{l_val:g}")
+                elif l_val > s_val:
+                    oppose.append(f"{name}_opposes_short long_score +{l_val:g} > short_score +{s_val:g}")
+                else:
+                    neutral_local.append(f"{name}_neutral")
+            else:
+                if l_val > s_val:
+                    neutral_local.append(f"neutral_decision_but_{name}_leans_long")
+                elif s_val > l_val:
+                    neutral_local.append(f"neutral_decision_but_{name}_leans_short")
+                else:
+                    neutral_local.append(f"{name}_neutral")
+        return support, oppose, neutral_local, contradiction_local
+
+    supporting, opposing, neutral, contradictions = analyze_score_breakdown(sb, decision)
+
+    # Macro / external signal keys, including counter signals.
+    for key, value in sb.items():
+        side = _side_from_key(key)
+        val = _sf(value)
+        if side == "neutral" or val == 0:
+            continue
+        desc = f"{key}={val:g}"
+        if "counter" in key.lower():
+            desc = f"{key}_counter_signal={val:g}"
+        if val < 0:
+            desc = f"{key}_negative_penalty={val:g}"
+        if decision == "long":
+            if side == "long":
+                _add_factor(supporting, desc)
+            elif side == "short":
+                _add_factor(opposing, desc)
+        elif decision == "short":
+            if side == "short":
+                _add_factor(supporting, desc)
+            elif side == "long":
+                _add_factor(opposing, desc)
+        else:
+            if side == "long":
+                _add_factor(neutral, f"neutral_decision_but_{key}_leans_long")
+            elif side == "short":
+                _add_factor(neutral, f"neutral_decision_but_{key}_leans_short")
+
+    # Explicit macro fields from evidence context.
+    macro_flags = {
+        "macro_move_type": macro_ctx.get("move_type"),
+        "macro_directional_bias": macro_ctx.get("directional_bias"),
+        "etf_signal": macro_ctx.get("etf_signal"),
+        "coinbase_signal": macro_ctx.get("coinbase_signal"),
+        "whale_pressure": liquid_ctx.get("whale_pressure"),
+        "ob_pressure": liquid_ctx.get("ob_pressure"),
+        "liq_magnet_below": liquid_ctx.get("liq_magnet_below"),
+        "liq_magnet_above": liquid_ctx.get("liq_magnet_above"),
+    }
+    for k, v in macro_flags.items():
+        if v in (None, "", "neutral"):
+            continue
+        text = f"{k}={v}"
+        if decision == "long":
+            if k in ("etf_signal", "coinbase_signal", "whale_pressure") and str(v).upper() in ("BULLISH", "POSITIVE", "BUY"):
+                _add_factor(supporting, text)
+            elif k in ("etf_signal", "coinbase_signal", "whale_pressure") and str(v).upper() in ("BEARISH", "NEGATIVE", "SELL"):
+                _add_factor(opposing, text)
+            elif k in ("liq_magnet_above",) and bool(v):
+                _add_factor(supporting, text)
+            elif k in ("liq_magnet_below",) and bool(v):
+                _add_factor(opposing, text)
+            elif k == "macro_move_type" and "BEAR" in str(v).upper():
+                _add_factor(opposing, f"macro_counter_against_long {text}")
+            elif k == "macro_move_type" and "BULL" in str(v).upper():
+                _add_factor(supporting, text)
+        elif decision == "short":
+            if k in ("etf_signal", "coinbase_signal", "whale_pressure") and str(v).upper() in ("BEARISH", "NEGATIVE", "SELL"):
+                _add_factor(supporting, text)
+            elif k in ("etf_signal", "coinbase_signal", "whale_pressure") and str(v).upper() in ("BULLISH", "POSITIVE", "BUY"):
+                _add_factor(opposing, text)
+            elif k in ("liq_magnet_below",) and bool(v):
+                _add_factor(supporting, text)
+            elif k in ("liq_magnet_above",) and bool(v):
+                _add_factor(opposing, text)
+            elif k == "macro_move_type" and "BULL" in str(v).upper():
+                _add_factor(opposing, f"macro_counter_against_short {text}")
+            elif k == "macro_move_type" and "BEAR" in str(v).upper():
+                _add_factor(supporting, text)
+        else:
+            neutral.append(f"{k}={v}")
+
     trend_1s = _normalize_direction(s1s.get("trend", {}).get("direction"))
     trend_1m = _normalize_direction(s1m.get("trend", {}).get("direction"))
     micro_bos = _normalize_direction((s1s.get("bos") or {}).get("micro_bos"))
     dominant_direction = _normalize_direction(gate.get("dominant_direction") or ev.get("dominant_side"))
     scenario_dir = _normalize_direction(scen.get("dominant_direction"))
-    price_loc = str(zone.get("price_location") or ev.get("evidence_components", {}).get("baseline", {}).get("vwap_side") or "unknown")
+    price_loc = str(zone.get("price_location") or baseline_ctx.get("vwap_side") or "unknown")
     poc_rel = str(vp.get("price_vs_poc") or "not_available")
     session = str(regime.get("session") or "not_available")
     bias_dir = _normalize_direction(bias.get("dominant_bias"))
     cascade = str(liq.get("cascade_risk") or "not_available")
 
-    # Supporting / opposing / neutral
     if decision == "long":
-        if _sf(sb.get("candle_dna_long")) > _sf(sb.get("candle_dna_short")):
-            supporting.append("candle_dna_long > candle_dna_short")
+        if trend_1s == "long":
+            supporting.append("trend_1s uptrend")
+        elif trend_1s == "short":
+            opposing.append("trend_1s downtrend")
         else:
-            opposing.append("candle_dna_short >= candle_dna_long")
-        if _normalize_direction(gate.get("dominant_direction")) == "long":
-            supporting.append("gate dominant_direction bullish")
-        elif gate.get("setup_grade") in ("A", "B", "C"):
-            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
-        else:
-            neutral.append(f"gate={gate.get('setup_grade', 'none')}")
+            neutral.append("trend_1s ranging")
         if trend_1m == "long":
             supporting.append("trend_1m uptrend")
         elif trend_1m == "short":
@@ -213,9 +319,16 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
             opposing.append("micro_bos bearish")
         else:
             neutral.append("micro_bos=None")
-        if price_loc in ("demand", "below_poc", "below_value", "at_val"):
+        if delta := _sf(candle_dna.get("delta")):
+            if delta > 0:
+                supporting.append(f"delta_positive {delta:g}")
+            else:
+                opposing.append(f"delta_negative {delta:g}")
+        else:
+            neutral.append("delta=0")
+        if price_loc in ("demand", "discount", "below_poc", "fvg", "at_poc", "below_value", "at_val"):
             supporting.append(f"price_location={price_loc}")
-        elif price_loc in ("supply", "above_poc", "above_value", "at_vah"):
+        elif price_loc in ("supply", "premium", "above_poc", "above_value", "at_vah"):
             opposing.append(f"price_location={price_loc}")
         else:
             neutral.append(f"price_location={price_loc}")
@@ -225,21 +338,33 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
             opposing.append("scenario_direction bearish")
         else:
             neutral.append("scenario_direction neutral")
-        if _sf(calibration.get("win_rate")) > 50 and _sf(calibration.get("sample_count")) >= 30:
-            supporting.append("historical calibration supportive")
+        if bias_dir == "long":
+            supporting.append("bias long")
+        elif bias_dir == "short":
+            opposing.append("bias short")
         else:
-            opposing.append("historical calibration not supportive")
-    elif decision == "short":
-        if _sf(sb.get("candle_dna_short")) > _sf(sb.get("candle_dna_long")):
-            supporting.append("candle_dna_short > candle_dna_long")
-        else:
-            opposing.append("candle_dna_long >= candle_dna_short")
-        if _normalize_direction(gate.get("dominant_direction")) == "short":
-            supporting.append("gate dominant_direction bearish")
-        elif gate.get("setup_grade") in ("A", "B", "C"):
-            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
+            neutral.append("bias=neutral")
+        if gate.get("dominant_direction") in ("bullish", "long"):
+            supporting.append(f"gate dominant_direction={gate.get('dominant_direction')}")
+        elif gate.get("dominant_direction") in ("bearish", "short"):
+            opposing.append(f"gate dominant_direction={gate.get('dominant_direction')}")
         else:
             neutral.append(f"gate={gate.get('setup_grade', 'none')}")
+        if gate.get("setup_grade") not in (None, "", "none"):
+            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
+        else:
+            warnings.append("gate_neutral")
+        if _sf(calibration.get("win_rate")) > 0 and _sf(calibration.get("sample_count")) >= 30:
+            opposing.append("historical calibration weak for long")
+        if _sf(calibration.get("win_rate")) == 0 and _sf(calibration.get("sample_count")) >= 30:
+            contradictions.append("historical WR=0.0 with calibrated reliability")
+    elif decision == "short":
+        if trend_1s == "short":
+            supporting.append("trend_1s downtrend")
+        elif trend_1s == "long":
+            opposing.append("trend_1s uptrend")
+        else:
+            neutral.append("trend_1s ranging")
         if trend_1m == "short":
             supporting.append("trend_1m downtrend")
         elif trend_1m == "long":
@@ -252,9 +377,16 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
             opposing.append("micro_bos bullish")
         else:
             neutral.append("micro_bos=None")
-        if price_loc in ("supply", "above_poc", "above_value", "at_vah"):
+        if delta := _sf(candle_dna.get("delta")):
+            if delta < 0:
+                supporting.append(f"delta_negative {delta:g}")
+            else:
+                opposing.append(f"delta_positive {delta:g}")
+        else:
+            neutral.append("delta=0")
+        if price_loc in ("supply", "premium", "above_poc", "fvg", "at_poc", "above_value", "at_vah"):
             supporting.append(f"price_location={price_loc}")
-        elif price_loc in ("demand", "below_poc", "below_value", "at_val"):
+        elif price_loc in ("demand", "discount", "below_poc", "below_value", "at_val"):
             opposing.append(f"price_location={price_loc}")
         else:
             neutral.append(f"price_location={price_loc}")
@@ -264,10 +396,26 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
             opposing.append("scenario_direction bullish")
         else:
             neutral.append("scenario_direction neutral")
-        if _sf(calibration.get("win_rate")) > 50 and _sf(calibration.get("sample_count")) >= 30:
-            supporting.append("historical calibration supportive")
+        if bias_dir == "short":
+            supporting.append("bias short")
+        elif bias_dir == "long":
+            opposing.append("bias long")
         else:
-            opposing.append("historical calibration not supportive")
+            neutral.append("bias=neutral")
+        if gate.get("dominant_direction") in ("bearish", "short"):
+            supporting.append(f"gate dominant_direction={gate.get('dominant_direction')}")
+        elif gate.get("dominant_direction") in ("bullish", "long"):
+            opposing.append(f"gate dominant_direction={gate.get('dominant_direction')}")
+        else:
+            neutral.append(f"gate={gate.get('setup_grade', 'none')}")
+        if gate.get("setup_grade") not in (None, "", "none"):
+            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
+        else:
+            warnings.append("gate_neutral")
+        if _sf(calibration.get("win_rate")) > 0 and _sf(calibration.get("sample_count")) >= 30:
+            supporting.append("historical calibration weak for short")
+        if _sf(calibration.get("win_rate")) == 0 and _sf(calibration.get("sample_count")) >= 30:
+            contradictions.append("historical WR=0.0 with calibrated reliability")
     else:
         neutral.extend([
             f"gate={gate.get('setup_grade', 'none')}",
@@ -275,8 +423,45 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
             f"trend_1m={trend_1m}",
             f"micro_bos={micro_bos}",
             f"scenario_direction={scenario_dir}",
+            f"bias={bias_dir}",
             f"price_location={price_loc}",
         ])
+        if _sf(candle_dna.get("delta")) and _sf(candle_dna.get("delta")) > 0:
+            neutral.append("neutral_decision_but_delta_leans_long")
+        elif _sf(candle_dna.get("delta")) and _sf(candle_dna.get("delta")) < 0:
+            neutral.append("neutral_decision_but_delta_leans_short")
+
+    # Explicit contradiction checks.
+    if decision == "long":
+        if _sf(sb.get("short_score", short_score)) > _sf(sb.get("long_score", long_score)) + 0.01:
+            contradictions.append("decision=LONG but short_score>long_score")
+        if trend_1m == "short":
+            contradictions.append("decision=LONG but trend_1m=downtrend")
+        if dominant_direction == "short":
+            contradictions.append("decision=LONG but dominant_side=short")
+        if scenario_dir == "short":
+            contradictions.append("decision=LONG but scenario_direction bearish")
+        if micro_bos == "short":
+            contradictions.append("decision=LONG but micro_bos=bearish")
+        if gate.get("dominant_direction") in ("bearish", "short"):
+            contradictions.append("decision=LONG but gate dominant_direction bearish")
+        if _sf(calibration.get("win_rate")) == 0 and _sf(calibration.get("sample_count")) >= 30:
+            contradictions.append("historical WR=0.0 with calibrated reliability")
+    elif decision == "short":
+        if _sf(sb.get("long_score", long_score)) > _sf(sb.get("short_score", short_score)) + 0.01:
+            contradictions.append("decision=SHORT but long_score>short_score")
+        if trend_1m == "long":
+            contradictions.append("decision=SHORT but trend_1m=uptrend")
+        if dominant_direction == "long":
+            contradictions.append("decision=SHORT but dominant_side=long")
+        if scenario_dir == "long":
+            contradictions.append("decision=SHORT but scenario_direction bullish")
+        if micro_bos == "long":
+            contradictions.append("decision=SHORT but micro_bos=bullish")
+        if gate.get("dominant_direction") in ("bullish", "long"):
+            contradictions.append("decision=SHORT but gate dominant_direction bullish")
+        if _sf(calibration.get("win_rate")) == 0 and _sf(calibration.get("sample_count")) >= 30:
+            contradictions.append("historical WR=0.0 with calibrated reliability")
 
     if gate.get("setup_grade") in (None, "", "none"):
         warnings.append("gate_neutral")
@@ -284,6 +469,8 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
         warnings.append("no_active_scenario")
     if decision != "neutral" and len(supporting) < 2:
         warnings.append("evidence_neutral")
+    if decision in ("long", "short") and not supporting:
+        warnings.append("no_supporting_factors_found")
 
     if _sf(calibration.get("win_rate")) <= 50 or _sf(calibration.get("sample_count")) < 30:
         warnings.append("historical_not_supportive")
@@ -312,26 +499,37 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
 
     if not context_sources.get("evidence"):
         missing_sources.append("evidence_stream")
+        missing_sources.append("missing_evidence_score_breakdown")
     if not context_sources.get("gate"):
         missing_sources.append("decision_gate_output")
+        missing_sources.append("missing_gate")
     if not context_sources.get("structure_1s"):
         missing_sources.append("structure_1s")
+        missing_sources.append("missing_structure_1s")
     if not context_sources.get("structure_1m"):
         missing_sources.append("structure_1m")
+        missing_sources.append("missing_structure_1m")
     if not context_sources.get("scenario"):
         missing_sources.append("scenarios")
+        missing_sources.append("missing_scenario")
     if not context_sources.get("zone"):
         missing_sources.append("zone_context")
+        missing_sources.append("missing_zone")
     if not context_sources.get("volume_profile"):
         missing_sources.append("volume_profile")
     if not context_sources.get("bias"):
         missing_sources.append("bias_context")
+        missing_sources.append("missing_bias")
     if not context_sources.get("regime"):
         missing_sources.append("regime_context")
+        missing_sources.append("missing_regime")
     if not context_sources.get("liquidity"):
         missing_sources.append("liquidation_clusters")
     if not calibration.get("raw"):
         missing_sources.append("calibration_profiles")
+        missing_sources.append("missing_calibration")
+    if calibration.get("win_rate") is None:
+        missing_sources.append("missing_probability")
 
     if not supporting:
         warnings.append("supporting_factors_empty")
@@ -343,6 +541,12 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
         warnings.append("missing_probability")
     if scenario_dir == "neutral":
         warnings.append("scenario_neutral")
+    if decision == "neutral" and confidence >= MIN_CONFIDENCE:
+        warnings.append("neutral_with_high_confidence")
+    if decision == "neutral" and (long_score > 0.6 or short_score > 0.6):
+        warnings.append("neutral_with_strong_component")
+    if decision in ("long", "short") and not supporting:
+        warnings.append("no_supporting_factors_found")
     if bias_dir == "neutral":
         neutral.append("bias=neutral")
     if session == "not_available":
@@ -350,8 +554,9 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
     if cascade == "not_available":
         neutral.append("cascade=not_available")
 
-    quality = "weak"
-    if len(supporting) >= 5 and not contradictions:
+    if decision == "neutral":
+        quality = "neutral"
+    elif len(supporting) >= 5 and not contradictions:
         quality = "strong"
     elif len(supporting) >= 3 and len(contradictions) <= 1:
         quality = "moderate"
@@ -361,7 +566,7 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
         quality = "weak"
 
     source_snapshot = {
-        "evidence_score_breakdown": ev.get("score_breakdown", {}),
+        "evidence_score_breakdown": sb,
         "gate": gate,
         "structure_1s": {"trend": s1s.get("trend"), "bos": s1s.get("bos")},
         "structure_1m": {"trend": s1m.get("trend"), "bos": s1m.get("bos")},
@@ -377,9 +582,19 @@ def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
         "calibration": calibration.get("raw") or "not_available",
     }
 
-    decision_reason = decision_record.get("questions", {}).get("Q8_probability", {}).get("reason")
-    if not decision_reason:
-        decision_reason = f"{decision.upper()} via long={long_score:.3f} short={short_score:.3f}"
+    if decision == "neutral":
+        reason_parts = ["NEUTRAL decision"]
+        if neutral:
+            reason_parts.append(f"neutral factors: {', '.join(_join_preview(neutral, 4))}")
+        if contradictions:
+            reason_parts.append(f"contradictions: {', '.join(_join_preview(contradictions, 3))}")
+        decision_reason = "; ".join(reason_parts)
+    else:
+        decision_reason = (
+            f"{decision.upper()} decision: "
+            f"{', '.join(_join_preview(supporting, 4)) or 'no clear support'}; "
+            f"opposing: {', '.join(_join_preview(opposing, 3)) or 'none'}."
+        )
 
     return {
         "engine": "trade_brain_decision_audit",
