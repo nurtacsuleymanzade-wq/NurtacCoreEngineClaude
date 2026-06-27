@@ -102,6 +102,84 @@ def _read_all_jsonl(path: Path) -> list[dict]:
             records.clear()
     return records
 
+def _safe_unique_warning(state: TradeState, warning: str) -> None:
+    if warning and warning not in state.warnings:
+        state.warnings.append(warning)
+        if len(state.warnings) > 20:
+            state.warnings = list(dict.fromkeys(state.warnings[-20:]))
+
+def _jsonl_tail_records(path: Path, max_lines: int = 500) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            if end <= 0:
+                return []
+            size = min(end, 64 * 1024)
+            data = b""
+            while True:
+                f.seek(max(0, end - size))
+                chunk = f.read(size)
+                data = chunk + data
+                lines = data.splitlines()
+                if len(lines) >= max_lines + 1 or size >= end:
+                    break
+                size = min(end, size * 2)
+            out = []
+            for line in lines[-max_lines:]:
+                try:
+                    out.append(json.loads(line.decode("utf-8", errors="ignore")))
+                except Exception:
+                    continue
+            return out
+    except Exception:
+        return []
+
+def _safe_min_ts(trades: list[dict]) -> int | None:
+    vals = []
+    for trade in trades:
+        ts = trade.get("open_ts") or trade.get("entry_ts") or trade.get("qualification_ts")
+        try:
+            ts_i = int(ts)
+        except Exception:
+            continue
+        if ts_i > 0:
+            vals.append(ts_i)
+    return min(vals) if vals else None
+
+def _open_price_stream_from_safe_position(path: Path, min_ts: int | None = None):
+    """
+    Live mode should start near the end of the file and only backfill a safe window.
+    Returns (file_handle, initial_records, cursor_mode, rebased_min_ts).
+    """
+    if not path.exists():
+        return None, [], "tail_safe", min_ts
+    fh = open(path, "r", encoding="utf-8-sig")
+    cursor_mode = "tail_safe"
+    initial_records: list[dict] = []
+    rebased_min_ts = min_ts
+    try:
+        if min_ts is None:
+            fh.seek(0, os.SEEK_END)
+            return fh, initial_records, cursor_mode, rebased_min_ts
+        cursor_mode = "live_tail"
+        safe_tail = _jsonl_tail_records(path, max_lines=800)
+        if safe_tail:
+            initial_records = [r for r in safe_tail if _sf(r.get("window_start_ts") or r.get("ts")) >= min_ts]
+            rebased_min_ts = min_ts
+            fh.seek(0, os.SEEK_END)
+            return fh, initial_records, cursor_mode, rebased_min_ts
+        fh.seek(0, os.SEEK_END)
+        return fh, initial_records, cursor_mode, rebased_min_ts
+    except Exception:
+        try:
+            fh.seek(0, os.SEEK_END)
+        except Exception:
+            pass
+        return fh, initial_records, cursor_mode, rebased_min_ts
+
 def _safe_write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     try:
@@ -290,15 +368,25 @@ class TradeState:
         self.current_price: float | None = None
         self.timestamp_guard_enabled: bool = True
         self.stale_price_events_ignored: int = 0
+        self.stale_price_events_ignored_total: int = 0
+        self.stale_price_events_ignored_last_cycle: int = 0
+        self.stale_price_events_rate_per_min: float = 0.0
         self.negative_duration_prevented_count: int = 0
         self.last_timestamp_warning: str = ""
         self.lifecycle_timestamp_valid: bool = True
+        self.lifecycle_timestamp_guard_status: str = "clean"
         self.missing_inputs: list[str] = []
         self.warnings:       list[str] = []
         self.errors:         list[str] = []
         self.last_blocker: str | None = None
         self.last_blocker_setup_id: str | None = None
         self.last_blocker_fields: dict = {}
+        self.price_cursor_mode: str = "replay"
+        self.price_cursor_min_ts: int | None = None
+        self.price_cursor_last_seen_ts: int | None = None
+        self.price_cursor_rebased: bool = False
+        self._cycle_stale_ignored: int = 0
+        self._cycle_start_ts: float = time.time()
         # Streak tracking
         self.consec_wins:         int = 0
         self.consec_losses:       int = 0
@@ -623,9 +711,11 @@ def update_trades(state: TradeState, ts: int, price: float | None,
         open_ts = int(trade.get("open_ts") or 0)
         if open_ts > 0 and ts < open_ts:
             state.stale_price_events_ignored += 1
+            state._cycle_stale_ignored += 1
             state.last_timestamp_warning = "stale_price_event_before_open_ignored"
-            state.lifecycle_timestamp_valid = False
-            state.warnings.append("stale_price_event_before_open_ignored")
+            state.lifecycle_timestamp_valid = True
+            state.lifecycle_timestamp_guard_status = "protected"
+            _safe_unique_warning(state, "stale_price_event_before_open_ignored")
             continue
 
         direction   = trade["direction"]
@@ -804,6 +894,8 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
     trade["pnl_r"]   = round(pnl_r, 6)
     sim_result = calc_pnl_usd(trade, close_price)
     trade.setdefault("sim", {}).update(sim_result)
+    state.lifecycle_timestamp_valid = True
+    state.lifecycle_timestamp_guard_status = "protected" if state.stale_price_events_ignored_total > 0 else "clean"
 
     # outcome
     if reason == "sl_hit":
@@ -1046,6 +1138,17 @@ def _write_open_positions(state: TradeState) -> None:
 
 # ── Health ────────────────────────────────────────────────────────────────────
 def _write_health(state: TradeState) -> None:
+    if state._cycle_start_ts:
+        elapsed_min = max((time.time() - state._cycle_start_ts) / 60.0, 1e-6)
+    else:
+        elapsed_min = 1.0
+    state.stale_price_events_ignored_total = state.stale_price_events_ignored
+    state.stale_price_events_ignored_last_cycle = state._cycle_stale_ignored
+    state.stale_price_events_rate_per_min = round(state.stale_price_events_ignored_total / elapsed_min, 2)
+    if state.lifecycle_timestamp_valid:
+        state.lifecycle_timestamp_guard_status = "protected" if state.stale_price_events_ignored_total > 0 else "clean"
+    else:
+        state.lifecycle_timestamp_guard_status = "broken"
     _safe_write_json(HEALTH_FILE, {
         "status":               "alive",
         "total_trades_opened":  state.total_opened,
@@ -1059,14 +1162,24 @@ def _write_health(state: TradeState) -> None:
         "last_price_ts":        state.last_price_ts,
         "last_close_event_ts":  state.last_close_event_ts,
         "timestamp_guard_enabled": state.timestamp_guard_enabled,
-        "stale_price_events_ignored": state.stale_price_events_ignored,
+        "stale_price_events_ignored": state.stale_price_events_ignored_total,
+        "stale_price_events_ignored_total": state.stale_price_events_ignored_total,
+        "stale_price_events_ignored_last_cycle": state.stale_price_events_ignored_last_cycle,
+        "stale_price_events_rate_per_min": state.stale_price_events_rate_per_min,
         "negative_duration_prevented_count": state.negative_duration_prevented_count,
         "last_timestamp_warning": state.last_timestamp_warning,
         "lifecycle_timestamp_valid": state.lifecycle_timestamp_valid,
+        "lifecycle_timestamp_guard_status": state.lifecycle_timestamp_guard_status,
+        "price_cursor_mode": state.price_cursor_mode,
+        "price_cursor_min_ts": state.price_cursor_min_ts,
+        "price_cursor_last_seen_ts": state.price_cursor_last_seen_ts,
+        "price_cursor_rebased": state.price_cursor_rebased,
         "missing_inputs":       state.missing_inputs,
         "warnings":             state.warnings[-20:],
         "errors":               state.errors[-20:],
     })
+    state._cycle_stale_ignored = 0
+    state._cycle_start_ts = time.time()
 
 
 # ── Validation helpers ────────────────────────────────────────────────────────
@@ -1398,25 +1511,26 @@ async def _tail_prices(state: TradeState, trades_fh) -> None:
         if HALT_FILE.exists():
             return
         await asyncio.sleep(1.0)
+    min_ts = _safe_min_ts(list(state.open_trades.values()))
+    state.price_cursor_min_ts = min_ts
+    fh, initial_records, cursor_mode, rebased_min_ts = _open_price_stream_from_safe_position(PRIMARY_FILE, min_ts=min_ts)
+    state.price_cursor_mode = cursor_mode
+    state.price_cursor_rebased = rebased_min_ts is not None
+    if fh is None:
+        return
 
-    with open(PRIMARY_FILE, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                ts  = row.get("window_start_ts")
-                px  = _extract_price(row)
-                if ts is not None and px is not None:
-                    update_trades(state, int(ts), px, trades_fh)
-            except Exception:
-                pass
+    try:
+        for row in initial_records:
+            ts = row.get("window_start_ts")
+            px = _extract_price(row)
+            if ts is not None and px is not None:
+                state.price_cursor_last_seen_ts = int(ts)
+                update_trades(state, int(ts), px, trades_fh)
 
         while True:
             if HALT_FILE.exists():
                 return
-            line = f.readline()
+            line = fh.readline()
             if not line:
                 await asyncio.sleep(POLL_SLEEP)
                 continue
@@ -1425,12 +1539,23 @@ async def _tail_prices(state: TradeState, trades_fh) -> None:
                 continue
             try:
                 row = json.loads(line)
-                ts  = row.get("window_start_ts")
-                px  = _extract_price(row)
+                ts = row.get("window_start_ts")
+                px = _extract_price(row)
                 if ts is not None and px is not None:
-                    update_trades(state, int(ts), px, trades_fh)
+                    ts_i = int(ts)
+                    state.price_cursor_last_seen_ts = ts_i
+                    if min_ts is not None and ts_i < min_ts:
+                        state.price_cursor_mode = "live_tail"
+                        _safe_unique_warning(state, "price_cursor_rebased_to_open_ts")
+                        continue
+                    update_trades(state, ts_i, px, trades_fh)
             except Exception:
-                pass
+                continue
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
 
 
 async def _periodic(state: TradeState) -> None:
