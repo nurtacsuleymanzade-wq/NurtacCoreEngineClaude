@@ -285,8 +285,14 @@ class TradeState:
         self.total_closed:  int  = 0
         self.last_trade_open_ts:  int | None = None
         self.last_trade_close_ts: int | None = None
+        self.last_close_event_ts: int | None = None
         self.last_price_ts:       int | None = None
         self.current_price: float | None = None
+        self.timestamp_guard_enabled: bool = True
+        self.stale_price_events_ignored: int = 0
+        self.negative_duration_prevented_count: int = 0
+        self.last_timestamp_warning: str = ""
+        self.lifecycle_timestamp_valid: bool = True
         self.missing_inputs: list[str] = []
         self.warnings:       list[str] = []
         self.errors:         list[str] = []
@@ -409,7 +415,7 @@ def is_qualified_setup_record(setup: dict) -> bool:
 
     return True
 
-def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
+def try_open_trade(state: TradeState, setup: dict, trades_fh, market_ts: int | None = None) -> bool:
     setup = _normalize_qualified_setup(setup)
     # C1: status
     status = setup.get("status", "open")
@@ -508,7 +514,12 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     setup_type      = setup.get("setup_type", "normal")
     quality_tier    = setup.get("quality_tier", "L1_LOW")
     timeframe_source = _infer_timeframe(setup)
-    open_ts   = int(time.time() * 1000)  # her zaman şimdiki an — qualification_ts geçmiş olabilir
+    now_ms = int(time.time() * 1000)
+    setup_ts = int(setup.get("qualification_ts") or setup.get("window_start_ts") or setup.get("ts") or 0)
+    if market_ts is not None and market_ts > 0:
+        open_ts = max(int(market_ts), setup_ts)
+    else:
+        open_ts = max(now_ms, setup_ts)
     sl_pct = abs(open_price - sl_price) / open_price if open_price > 0 else 0.0
     sim = calc_position_size(
         _current_balance(state), quality_tier, sl_pct, open_price,
@@ -609,6 +620,14 @@ def update_trades(state: TradeState, ts: int, price: float | None,
     to_close: list[tuple[str, str, float]] = []  # (trade_id, reason, close_price)
 
     for trade_id, trade in state.open_trades.items():
+        open_ts = int(trade.get("open_ts") or 0)
+        if open_ts > 0 and ts < open_ts:
+            state.stale_price_events_ignored += 1
+            state.last_timestamp_warning = "stale_price_event_before_open_ignored"
+            state.lifecycle_timestamp_valid = False
+            state.warnings.append("stale_price_event_before_open_ignored")
+            continue
+
         direction   = trade["direction"]
         open_price  = trade["open_price"]
         sl_price    = trade["sl_price"]
@@ -712,15 +731,34 @@ def update_trades(state: TradeState, ts: int, price: float | None,
         trade = state.open_trades.pop(trade_id, None)
         if trade is None:
             continue
-        _close_trade(state, trade, ts, cp, reason, trades_fh)
+        closed = _close_trade(state, trade, ts, cp, reason, trades_fh)
+        if not closed:
+            state.open_trades[trade_id] = trade
 
 
 # ── Close a trade ─────────────────────────────────────────────────────────────
 def _close_trade(state: TradeState, trade: dict, close_ts: int,
-                 close_price: float, reason: str, trades_fh) -> None:
+                 close_price: float, reason: str, trades_fh) -> bool:
     direction  = trade["direction"]
     open_price = trade["open_price"]
     sl_original = trade.get("sl_original", trade["sl_price"])
+    open_ts = int(trade.get("open_ts") or 0)
+    if open_ts > 0 and close_ts < open_ts:
+        state.negative_duration_prevented_count += 1
+        state.last_timestamp_warning = "negative_duration_prevented"
+        state.lifecycle_timestamp_valid = False
+        state.warnings.append("negative_duration_prevented")
+        return False
+
+    risk_dist = abs(open_price - sl_original) if sl_original > 0 else 0.0
+    if risk_dist <= 0:
+        state.last_blocker = "invalid_risk_distance_for_pnl"
+        state.last_blocker_fields = {"open_price": open_price, "sl_original": sl_original, "trade_id": trade.get("trade_id")}
+        state.errors.append("invalid_risk_distance_for_pnl")
+        state.last_timestamp_warning = "invalid_risk_distance_for_pnl"
+        state.lifecycle_timestamp_valid = False
+        state.warnings.append("invalid_risk_distance_for_pnl")
+        return False
 
     trade["close_ts"]    = close_ts
     trade["close_price"] = close_price
@@ -734,7 +772,6 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
         pnl_pct = (open_price - close_price) / open_price * 100
 
     # pnl_r
-    risk_dist = abs(open_price - sl_original) if sl_original > 0 else 1.0
     if direction == "long":
         pnl_r = (close_price - open_price) / risk_dist
     else:
@@ -875,6 +912,8 @@ def _close_trade(state: TradeState, trade: dict, close_ts: int,
     _print_close(rec)
     _write_summary(state)
     _write_portfolio(state)
+    state.last_close_event_ts = close_ts
+    return True
 
 
 # ── Summary computation ───────────────────────────────────────────────────────
@@ -1018,6 +1057,12 @@ def _write_health(state: TradeState) -> None:
         "last_trade_open_ts":   state.last_trade_open_ts,
         "last_trade_close_ts":  state.last_trade_close_ts,
         "last_price_ts":        state.last_price_ts,
+        "last_close_event_ts":  state.last_close_event_ts,
+        "timestamp_guard_enabled": state.timestamp_guard_enabled,
+        "stale_price_events_ignored": state.stale_price_events_ignored,
+        "negative_duration_prevented_count": state.negative_duration_prevented_count,
+        "last_timestamp_warning": state.last_timestamp_warning,
+        "lifecycle_timestamp_valid": state.lifecycle_timestamp_valid,
         "missing_inputs":       state.missing_inputs,
         "warnings":             state.warnings[-20:],
         "errors":               state.errors[-20:],
@@ -1258,7 +1303,7 @@ def run_batch() -> None:
 
             # Open setups whose qualification_ts <= current bar ts
             while si < len(setups) and setups[si]["qualification_ts"] <= ts:
-                try_open_trade(state, setups[si], trades_fh)
+                try_open_trade(state, setups[si], trades_fh, market_ts=ts)
                 si += 1
 
             # Update open trades with this price bar
@@ -1277,7 +1322,7 @@ def run_batch() -> None:
 
         # Open remaining setups (after price data ends)
         while si < len(setups):
-            try_open_trade(state, setups[si], None)
+            try_open_trade(state, setups[si], None, market_ts=prices[-1][0] if prices else None)
             si += 1
 
         # Force-close remaining open trades at last price
