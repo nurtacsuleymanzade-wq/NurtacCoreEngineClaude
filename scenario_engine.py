@@ -977,7 +977,7 @@ def run_batch() -> None:
 
             errs = _validate_output(result)
             if errs:
-                print(f"[SCEN] VALIDATION ERROR ts={ts}: {errs}", flush=True)
+                print(f"[SCEN] validation issues ts={ts}: {errs}", flush=True)
 
             _write_jsonl(sc_fh, result)
             n_written += 1
@@ -1236,7 +1236,7 @@ async def _primary_task(ctx: LiveCtx) -> None:
 
             errs = _validate_output(result)
             if errs:
-                print(f"[SCEN] VALIDATION ERROR ts={ts}: {errs}", flush=True)
+                print(f"[SCEN] validation issues ts={ts}: {errs}", flush=True)
 
             _write_jsonl(sc_fh, result)
 
