@@ -15,7 +15,7 @@ from pathlib import Path
 DATA = Path("/root/NurtacCoreEngineClaude/data")
 SYMBOL = "BTCUSDT"
 POLL_SLEEP = 1.0
-MIN_CONFIDENCE = 0.55
+MIN_CONFIDENCE = 0.60
 COOLDOWN_S = 120
 BRAIN_FILE = DATA / "trade_brain_output.jsonl"
 BRAIN_SETUPS = DATA / "trade_brain_setups.jsonl"
