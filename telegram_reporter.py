@@ -32,6 +32,17 @@ HALT_FILE = DATA_DIR / "SYSTEM_HALT"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    env_path = Path(".env")
+    if env_path.exists():
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("TELEGRAM_BOT_TOKEN=") and not TELEGRAM_TOKEN:
+                    TELEGRAM_TOKEN = line.split("=", 1)[1].strip() or None
+                elif line.startswith("TELEGRAM_CHAT_ID=") and not TELEGRAM_CHAT_ID:
+                    TELEGRAM_CHAT_ID = line.split("=", 1)[1].strip() or None
+        except Exception:
+            pass
 TELEGRAM_CONFIGURED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage" if TELEGRAM_TOKEN else None
@@ -58,6 +69,8 @@ PRIMARY_FILE = DATA_DIR / "combined_1s_dna_btcusdt.jsonl"
 
 # ── Output files ───────────────────────────────────────────────────────────────
 LOG_FILE = DATA_DIR / "telegram_log.jsonl"
+HEALTH_FILE = DATA_DIR / "telegram_health.json"
+SENT_IDS_FILE = DATA_DIR / "telegram_sent_ids.json"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _sf(v, default: float = 0.0) -> float:
@@ -100,8 +113,8 @@ def _read_json(path: Path) -> dict | None:
 def _send_telegram(text: str, parse_mode: str = "HTML") -> bool:
     """Send message to Telegram. Return True if successful or no token."""
     if not TELEGRAM_CONFIGURED:
-        print(text)  # Print to terminal as fallback
-        return True
+        print(f"[TELEGRAM] NOT CONFIGURED: {text}", flush=True)
+        return False
 
     try:
         payload = {
@@ -130,6 +143,112 @@ def _log_message(msg_type: str, content: str, metadata: dict | None = None) -> N
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+def _safe_write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(path)
+    except Exception:
+        pass
+
+def _load_sent_ids() -> set[str]:
+    try:
+        data = json.loads(SENT_IDS_FILE.read_text())
+        if isinstance(data, list):
+            return {str(x) for x in data if x is not None}
+        if isinstance(data, dict):
+            ids = data.get("sent_ids") or data.get("ids") or []
+            if isinstance(ids, list):
+                return {str(x) for x in ids if x is not None}
+    except Exception:
+        bak = SENT_IDS_FILE.with_suffix(f".json.bak.{int(time.time())}")
+        try:
+            if SENT_IDS_FILE.exists():
+                SENT_IDS_FILE.replace(bak)
+        except Exception:
+            pass
+    return set()
+
+def _write_sent_ids(sent_ids: set[str]) -> None:
+    _safe_write_json(SENT_IDS_FILE, {"sent_ids": sorted(sent_ids), "updated_at": int(time.time() * 1000)})
+
+def _write_health(**payload) -> None:
+    base = {
+        "status": "alive",
+        "last_blocker": None,
+        "last_error": None,
+        "last_sent_trade_id": None,
+        "last_status": "waiting_new_paper_trade",
+        "last_seen_trade_id": None,
+        "current_open_count": 0,
+        "configured": TELEGRAM_CONFIGURED,
+    }
+    base.update(payload)
+    _safe_write_json(HEALTH_FILE, base)
+
+def _paper_open_to_message(trade: dict) -> str | None:
+    trade_id = str(trade.get("trade_id") or trade.get("id") or "")
+    setup_id = str(trade.get("setup_id") or trade.get("source_setup_id") or trade.get("qualified_setup_id") or "")
+    direction = str(trade.get("direction") or trade.get("side") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return None
+    entry = _sf(
+        trade.get("entry_price")
+        or trade.get("open_price")
+        or trade.get("entry")
+        or (trade.get("entry") or {}).get("price")
+    )
+    sl = _sf(
+        trade.get("sl_price")
+        or trade.get("stop_loss")
+        or trade.get("sl")
+        or (trade.get("risk") or {}).get("sl_price")
+    )
+    tp1 = _sf(
+        trade.get("tp1")
+        or trade.get("tp1_price")
+        or (trade.get("targets") or {}).get("tp1")
+    )
+    tp2 = _sf(
+        trade.get("tp2")
+        or trade.get("tp2_price")
+        or (trade.get("targets") or {}).get("tp2")
+    )
+    tp3 = _sf(
+        trade.get("tp3")
+        or trade.get("tp3_price")
+        or (trade.get("targets") or {}).get("tp3")
+    )
+    if entry <= 0 or sl <= 0 or tp1 <= 0:
+        return None
+    source = trade.get("source") or trade.get("engine") or "paper_trade_engine"
+    confidence = trade.get("confidence")
+    ctx = trade.get("context_at_open") or trade.get("context") or trade.get("source_context") or {}
+    scenario = ctx.get("scenario") or trade.get("scenario") or "?"
+    q9 = ctx.get("gate_grade") or trade.get("quality_tier") or "?"
+    rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0.0
+    opened_at = trade.get("open_ts") or trade.get("entry_ts") or int(time.time() * 1000)
+    return (
+        "NurtacCoreEngine Paper Trade Açıldı\n"
+        f"Symbol: {SYMBOL}\n"
+        f"Direction: {direction}\n"
+        f"Entry: {entry:.2f}\n"
+        f"SL: {sl:.2f}\n"
+        f"TP1: {tp1:.2f}\n"
+        f"TP2: {tp2:.2f}\n"
+        f"TP3: {tp3:.2f}\n"
+        f"Setup ID: {setup_id or trade_id}\n"
+        f"Source: {source}\n"
+        f"Confidence: {confidence if confidence is not None else 'n/a'}\n"
+        f"Scenario: {scenario}\n"
+        f"Q9: {q9}\n"
+        f"Risk/RR: {rr:.2f}\n"
+        f"Time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(opened_at/1000))}\n"
+    )
 
 # ── Signal Message ─────────────────────────────────────────────────────────────
 def format_setup_message(setup: dict) -> str:
@@ -278,22 +397,37 @@ async def run_live() -> None:
     print("[TELEGRAM] Live mode — waiting for signals", flush=True)
 
     sent_signal_ids = set()
-    sent_trade_ids = set()
+    sent_trade_ids = _load_sent_ids()
     last_15min_report = time.time()
+    last_seen_trade_id = None
 
     while not HALT_FILE.exists():
         try:
-            # Check for new signals
-            final_setups = _read_last_jsonl(QUALIFIED_SETUPS_FILE, maxlen=50)
-            for setup in final_setups:
-                signal_id = f"{setup.get('qualification_ts', 0)}_{setup.get('qualified_setup_id', '')}"
-                if signal_id not in sent_signal_ids:
-                    msg = format_setup_message(setup)
+            open_state = _read_json(PAPER_TRADES_OPEN_FILE) or {}
+            open_trades = open_state.get("trades") if isinstance(open_state, dict) else []
+            if not isinstance(open_trades, list):
+                open_trades = []
+            current_open = len(open_trades)
+            latest_open = open_trades[-1] if open_trades else None
+            if latest_open:
+                trade_id = str(latest_open.get("trade_id") or latest_open.get("id") or "")
+                last_seen_trade_id = trade_id or last_seen_trade_id
+                if trade_id and trade_id not in sent_trade_ids:
+                    msg = _paper_open_to_message(latest_open)
                     if msg:
-                        if _send_telegram(msg):
-                            sent_signal_ids.add(signal_id)
-                            _log_message("signal", msg, {"setup_id": signal_id})
-                            print(f"[TELEGRAM] Signal sent: {signal_id}", flush=True)
+                        ok = _send_telegram(msg)
+                        if ok:
+                            sent_trade_ids.add(trade_id)
+                            _write_sent_ids(sent_trade_ids)
+                            _log_message("paper_open", msg, {"trade_id": trade_id, "setup_id": latest_open.get("source_setup_id") or latest_open.get("qualified_setup_id")})
+                            _write_health(last_status="sent", last_sent_trade_id=trade_id, last_seen_trade_id=trade_id, current_open_count=current_open)
+                            print(f"[TELEGRAM] Paper open sent: {trade_id}", flush=True)
+                        else:
+                            _write_health(last_status="telegram_api_error", last_blocker="telegram_api_error", last_error="sendMessage failed", last_seen_trade_id=trade_id, current_open_count=current_open)
+                    else:
+                        _write_health(last_status="paper_schema_mismatch", last_blocker="paper_schema_mismatch", last_error="missing entry/sl/tp1", last_seen_trade_id=trade_id, current_open_count=current_open)
+            else:
+                _write_health(last_status="waiting_new_paper_trade", last_blocker="waiting_new_paper_trade", last_seen_trade_id=last_seen_trade_id, current_open_count=0)
 
             # Check for trade closures
             trades = _read_last_jsonl(PAPER_TRADES_FILE, maxlen=100)
@@ -331,6 +465,7 @@ async def run_live() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            _write_health(last_status="telegram_reporter_error", last_blocker="reporter_not_started", last_error=str(e))
             print(f"[TELEGRAM] Error in live loop: {e}", flush=True)
 
         await asyncio.sleep(POLL_SLEEP)
@@ -345,6 +480,10 @@ async def main() -> None:
     print("[TELEGRAM] === NurtacCoreEngineClaude Telegram Reporter (v2) ===", flush=True)
     print(f"[TELEGRAM] Token configured: {TELEGRAM_CONFIGURED}", flush=True)
     print(f"[TELEGRAM] Starting live mode...", flush=True)
+    if not TELEGRAM_CONFIGURED:
+        _write_health(last_status="telegram_config_missing", last_blocker="telegram_config_missing", configured=False)
+    else:
+        _write_health(last_status="waiting_new_paper_trade", configured=True)
 
     await run_live()
 

@@ -34,6 +34,7 @@ ENGINES = [
     ("evidence", "evidence_engine.py"),
     ("observer", "observer_engine.py --mode live"),
     ("paper_trade", "paper_trade_engine.py --mode live"),
+    ("telegram_reporter", "telegram_reporter.py --mode live"),
     ("validator", "validator.py"),
 ]
 
