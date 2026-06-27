@@ -177,9 +177,11 @@ def _risk_gate(setup: dict) -> tuple[bool, str, float]:
     sl_d = setup.get("sl") or {}
     tp1_d = setup.get("tp1") or {}
 
-    entry = float(entry_d.get("price") or 0)
-    sl = float(sl_d.get("price") or 0)
-    tp1 = float(tp1_d.get("price") or 0)
+    risk_obj = setup.get("risk") or {}
+    tgt_obj  = setup.get("targets") or {}
+    entry = float(entry_d.get("price") or entry_d.get("recommended_entry") or 0)
+    sl    = float((setup.get("risk") or {}).get("sl_price") or sl_d.get("price") or 0)
+    tp1   = float((setup.get("targets") or {}).get("tp1") or tp1_d.get("price") or 0)
 
     if entry <= 0 or sl <= 0 or tp1 <= 0:
         return False, f"MISSING_PRICES entry={entry} sl={sl} tp1={tp1}", 0.0
