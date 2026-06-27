@@ -195,6 +195,7 @@ class ObservedSetup:
         self.quality_tier = setup.get("quality_tier", "L1_LOW")
         self.pattern_key  = setup.get("pattern_key", f"{self.setup_type}_{self.direction}")
         self.entry_timing = setup.get("entry_timing", "unknown")
+        self.source_layer = setup.get("engine", "unknown")
         self.source_setup = setup
         self.opened_ts    = opened_ts
         self.waiting_timeout_ms = (
@@ -245,6 +246,15 @@ class ObservedSetup:
         # Phase timing
         self.developing_start_ts: int | None = None
 
+        if self.source_layer == "trade_brain":
+            self.pattern_key = setup.get("pattern_key") or f"trade_brain_{self.direction}"
+            self.entry_timing = setup.get("entry", {}).get("timeframe_context", "1S")
+            self.brain_context = setup.get("context") or {}
+            self.brain_questions = setup.get("brain_questions") or {}
+        else:
+            self.brain_context = {}
+            self.brain_questions = {}
+
     def is_active(self) -> bool:
         return self.state not in TERMINAL_STATES
 
@@ -278,6 +288,7 @@ class ObservedSetup:
             "ts":              ts,
             "symbol":          SYMBOL,
             "source_setup_id": self.setup_id,
+            "source_layer":    self.source_layer,
             "event_type":      event,
             "state_before":    old_state,
             "state_after":     new_state,
@@ -289,6 +300,7 @@ class ObservedSetup:
             "bos_ok":          f_gates["f1_bos"],
             "vol_ok":          f_gates["f2_volume"],
             "regime_ok":       f_gates["f3_regime"],
+            "source_context":  self.brain_context,
         }
         _write_jsonl(obs_fh, rec)
 
@@ -314,6 +326,23 @@ class ObservedSetup:
             "details": details,
         })
         self._obs_write(ts, event, self.state, self.state, cur_price, details, obs_fh)
+
+    def _state_from_trade_brain(self, brain: dict | None) -> str | None:
+        if self.source_layer != "trade_brain":
+            return None
+        if not brain:
+            return "WAITING"
+        decision = (brain.get("decision") or "neutral").lower()
+        confidence = _sf(brain.get("confidence"), 0.0)
+        if decision == "neutral":
+            return "WAITING"
+        if confidence < MIN_BRAIN_SOFT_CONFIRMATIONS / 4:
+            return "WAITING"
+        if confidence < 0.65:
+            return "DEVELOPING"
+        if confidence < 0.80:
+            return "QUALIFYING"
+        return "QUALIFYING"
 
     # ── Main bar processor ────────────────────────────────────────────────────
     def process_bar(
@@ -390,6 +419,7 @@ class ObservedSetup:
 
         dom_scen_dir  = (scenario or {}).get("dominant_direction", "neutral")
         dom_scen_name = (scenario or {}).get("dominant_scenario")
+        brain_state_hint = self._state_from_trade_brain(self.source_setup if self.source_layer == "trade_brain" else None)
         cascade_scenario = next((
             item for item in (scenario or {}).get("active_scenarios", [])
             if item.get("scenario_name", item.get("name"))
@@ -437,6 +467,12 @@ class ObservedSetup:
             poc, vah, val, micro_bos, cur_loc,
             sweep_lbl, flow_dir, mean_vol,
         )
+
+        if brain_state_hint and self.source_layer == "trade_brain":
+            if self.state == "WAITING" and brain_state_hint in ("DEVELOPING", "QUALIFYING"):
+                self._transition(ts, brain_state_hint, "TB_CONTEXT", "trade brain context attached", cur_price, obs_fh)
+            elif self.state == "DEVELOPING" and brain_state_hint == "QUALIFYING":
+                self._transition(ts, "QUALIFYING", "TB_CONTEXT", "trade brain context attached", cur_price, obs_fh)
 
         # ── 4. Apply events ───────────────────────────────────────────────────
         for ev_type, details in events:

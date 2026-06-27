@@ -112,12 +112,16 @@ def analyze_market() -> dict:
     dom_scenario = scen.get("dominant_scenario")
     dom_scen_dir = scen.get("dominant_direction", "neutral")
     active_scens = scen.get("active_scenarios") or []
-    # developing senaryolardan en yüksek skorlu al
-    if not dom_scenario and active_scens:
-        developing = [s for s in active_scens if s.get("status") in ("developing","confirmed")]
+    scen_count = _sf(scen.get("scenario_count"), 0)
+    # geliştirme/confirm edilmiş senaryolardan en yüksek skorlu olanı kullan
+    if (not dom_scenario or dom_scenario in ("none", "")) and active_scens:
+        developing = [
+            s for s in active_scens
+            if s.get("status") in ("developing", "confirmed")
+        ]
         if developing:
-            best = max(developing, key=lambda x: x.get("score", 0))
-            dom_scenario = best.get("scenario_name")
+            best = max(developing, key=lambda x: _sf(x.get("score"), 0))
+            dom_scenario = best.get("scenario_name") or best.get("name")
             if not dom_scen_dir or dom_scen_dir == "neutral":
                 dom_scen_dir = best.get("direction") or "neutral"
     dom_bias = bias.get("dominant_bias", "neutral")
@@ -228,12 +232,6 @@ def analyze_market() -> dict:
         "LIQUIDITY_SWEEP": (0.35, 0.65),
         "RANGE_CONTINUATION": (0.5, 0.5),
     }
-    if not dom_scenario and active_scens:
-        best = max(
-            active_scens,
-            key=lambda x: x.get("score", 0) if isinstance(x, dict) else 0,
-        )
-        dom_scenario = best.get("name") if isinstance(best, dict) else str(best)
     if dom_scen_dir == "bullish":
         scenario_bias = (0.65, 0.35)
     elif dom_scen_dir == "bearish":
@@ -280,6 +278,9 @@ def analyze_market() -> dict:
             "price_loc": price_loc,
             "micro_bos": micro_bos,
             "scenario": dom_scenario,
+            "scenario_direction": dom_scen_dir,
+            "scenario_count": int(scen_count),
+            "scenario_snapshot": scen,
             "gate_grade": gate_grade,
             "dom_bias": dom_bias,
             "cascade": cascade_risk,
@@ -342,6 +343,9 @@ def maybe_emit_setup(result: dict, last_emit: dict) -> dict:
         "confidence": round(confidence, 3),
         "brain_questions": result.get("questions", {}),
         "context": result.get("context", {}),
+        "source_scenario": result.get("context", {}).get("scenario"),
+        "source_scenario_direction": result.get("context", {}).get("scenario_direction"),
+        "scenario_snapshot": result.get("context", {}).get("scenario_snapshot"),
         "status": "open",
     }
 
