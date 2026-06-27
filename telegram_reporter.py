@@ -60,6 +60,8 @@ def get_time_utc4_full() -> str:
 # ── Input files ────────────────────────────────────────────────────────────────
 FINAL_SETUPS_FILE = DATA_DIR / "final_setups.jsonl"
 QUALIFIED_SETUPS_FILE = DATA_DIR / "qualified_setups.jsonl"
+TRADE_BRAIN_FILE = DATA_DIR / "trade_brain_setups.jsonl"
+OBSERVATIONS_FILE = DATA_DIR / "observations.jsonl"
 BIAS_FILE = DATA_DIR / "bias_context.jsonl"
 PAPER_TRADES_FILE = DATA_DIR / "paper_trades.jsonl"
 PAPER_TRADES_OPEN_FILE = DATA_DIR / "paper_trades_open.json"
@@ -109,6 +111,24 @@ def _read_json(path: Path) -> dict | None:
             return json.load(f)
     except Exception:
         return None
+
+def _read_all_jsonl(path: Path, limit: int | None = None) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return rows[-limit:] if limit is not None else rows
 
 def _send_telegram(text: str, parse_mode: str = "HTML") -> bool:
     """Send message to Telegram. Return True if successful or no token."""
@@ -190,64 +210,219 @@ def _write_health(**payload) -> None:
     base.update(payload)
     _safe_write_json(HEALTH_FILE, base)
 
-def _paper_open_to_message(trade: dict) -> str | None:
+def _join_context(trade: dict) -> dict:
     trade_id = str(trade.get("trade_id") or trade.get("id") or "")
     setup_id = str(trade.get("setup_id") or trade.get("source_setup_id") or trade.get("qualified_setup_id") or "")
-    direction = str(trade.get("direction") or trade.get("side") or "").upper()
-    if direction not in ("LONG", "SHORT"):
+    direction = str(trade.get("direction") or trade.get("side") or "").upper() or "unknown"
+    entry = _sf(trade.get("entry_price") or trade.get("open_price") or trade.get("entry") or (trade.get("entry") or {}).get("price"))
+    sl = _sf(trade.get("sl_price") or trade.get("stop_loss") or trade.get("sl") or (trade.get("risk") or {}).get("sl_price"))
+    tp1 = _sf(trade.get("tp1") or trade.get("tp1_price") or (trade.get("targets") or {}).get("tp1"))
+    tp2 = _sf(trade.get("tp2") or trade.get("tp2_price") or (trade.get("targets") or {}).get("tp2"))
+    tp3 = _sf(trade.get("tp3") or trade.get("tp3_price") or (trade.get("targets") or {}).get("tp3"))
+    source_setup_id = str(trade.get("source_setup_id") or trade.get("setup_id") or "")
+    qualified_setup_id = str(trade.get("qualified_setup_id") or "")
+    warning = "none"
+
+    def _pick_str(*values, default: str = "not_available") -> str:
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.lower() not in {"none", "null", "nan"}:
+                return text
+        return default
+
+    def _pick_dict(*values) -> dict:
+        for value in values:
+            if isinstance(value, dict) and value:
+                return value
+        return {}
+
+    qualified = None
+    if setup_id or source_setup_id or qualified_setup_id:
+        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
+        for rec in reversed(_read_all_jsonl(QUALIFIED_SETUPS_FILE, limit=200)):
+            rid = str(rec.get("source_setup_id") or rec.get("qualified_setup_id") or rec.get("setup_id") or "")
+            if rid in lookup_ids:
+                qualified = rec
+                break
+
+    brain = None
+    if setup_id or source_setup_id or qualified_setup_id:
+        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
+        for rec in reversed(_read_all_jsonl(TRADE_BRAIN_FILE, limit=400)):
+            rid = str(
+                rec.get("source_setup_id")
+                or rec.get("setup_id")
+                or rec.get("qualified_setup_id")
+                or ""
+            )
+            if rid in lookup_ids:
+                brain = rec
+                break
+
+    obs = None
+    if setup_id or source_setup_id or qualified_setup_id:
+        lookup_ids = {setup_id, source_setup_id, qualified_setup_id}
+        for rec in reversed(_read_all_jsonl(OBSERVATIONS_FILE, limit=800)):
+            rid = str(rec.get("source_setup_id") or rec.get("setup_id") or "")
+            if rid in lookup_ids:
+                obs = rec
+                break
+
+    source_context = _pick_dict(
+        trade.get("context_at_open")
+        or trade.get("context")
+        or trade.get("source_context")
+        or (qualified or {}).get("context_at_qualification")
+        or (brain or {}).get("context")
+        or (brain or {}).get("context_snapshot")
+        or (qualified or {}).get("context_at_qualification")
+        or (obs or {}).get("source_context")
+        or {}
+    )
+    scenario_snapshot = _pick_dict(
+        (brain or {}).get("scenario_snapshot"),
+        source_context.get("scenario_snapshot"),
+        (trade or {}).get("scenario_snapshot"),
+    )
+    q9_reason = _pick_str(
+        (brain or {}).get("brain_questions", {}).get("Q9_market_intent", {}).get("reason"),
+        (brain or {}).get("q9_reason"),
+        (qualified or {}).get("q9_reason"),
+        default="no_q9_context",
+    )
+    scenario = _pick_str(
+        scenario_snapshot.get("dominant_scenario"),
+        source_context.get("scenario"),
+        source_context.get("active_scenario"),
+        (qualified or {}).get("scenario"),
+        default="no_scenario",
+    )
+    scenario_direction = _pick_str(
+        scenario_snapshot.get("dominant_direction"),
+        source_context.get("scenario_direction"),
+        source_context.get("dom_bias"),
+        default="unknown",
+    )
+    scenario_status = _pick_str(
+        scenario_snapshot.get("status"),
+        (brain or {}).get("status"),
+        (qualified or {}).get("status"),
+        default="not_available",
+    )
+    observer_state = _pick_str(
+        (obs or {}).get("state_after"),
+        (obs or {}).get("state_before"),
+        (obs or {}).get("state"),
+        default="not_available",
+    )
+    observer_event = _pick_str((obs or {}).get("event_type"), default="not_available")
+    observer_reason = _pick_str((obs or {}).get("observer_reason"), (obs or {}).get("details"), default="not_available")
+    confidence = (brain or {}).get("confidence")
+    if confidence is None:
+        confidence = (qualified or {}).get("confidence")
+    confidence_text = f"{confidence:.3f}" if isinstance(confidence, (int, float)) else "not_available"
+    if entry > 0 and sl > 0 and tp1 > 0:
+        dist = abs(entry - sl)
+        if dist == 0:
+            rr_text = "invalid"
+            warning = "entry_equals_sl"
+        else:
+            rr_text = f"{abs(tp1 - entry) / dist:.2f}"
+    else:
+        rr_text = "invalid"
+        warning = "missing_entry_or_sl_or_tp1"
+
+    return {
+        "trade_id": trade_id or "not_available",
+        "setup_id": setup_id or "not_available",
+        "source_setup_id": source_setup_id or "not_available",
+        "qualified_setup_id": qualified_setup_id or "not_available",
+        "direction": direction,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "rr_text": rr_text,
+        "warning": warning,
+        "confidence": confidence_text,
+        "decision": (qualified or {}).get("brain_decision") or (brain or {}).get("decision") or "unknown",
+        "q9_reason": q9_reason,
+        "scenario": scenario or "no_scenario",
+        "scenario_direction": scenario_direction,
+        "scenario_status": scenario_status,
+        "order_flow": {
+            "trend_1s": _pick_str(source_context.get("trend_1s"), default="unknown"),
+            "trend_1m": _pick_str(source_context.get("trend_1m"), default="unknown"),
+            "micro_bos": _pick_str(source_context.get("micro_bos"), source_context.get("macro_bos"), default="not_available"),
+            "gate_grade": _pick_str(source_context.get("gate_grade"), default="unknown"),
+            "price_loc": _pick_str(source_context.get("price_loc"), source_context.get("location"), source_context.get("profile_shape"), default="unknown"),
+            "dom_bias": _pick_str(source_context.get("dom_bias"), source_context.get("market_bias"), default="unknown"),
+            "cascade": _pick_str(source_context.get("cascade"), default="not_available"),
+            "session": _pick_str((qualified or {}).get("session_at_qualification"), source_context.get("session"), default="unknown"),
+        },
+        "observer": {
+            "state": observer_state,
+            "event": observer_event,
+            "reason": observer_reason,
+        },
+        "explanation": [
+            f"1. Trade Brain decision = {(qualified or {}).get('brain_decision') or (brain or {}).get('decision') or 'unknown'}.",
+            f"2. Q9 reason = {q9_reason}.",
+            f"3. Observer state = {observer_state}, event = {observer_event}.",
+        ],
+        "context_source": "enriched" if (qualified or brain or obs) else "missing",
+    }
+
+def _paper_open_to_message(trade: dict) -> str | None:
+    ctx = _join_context(trade)
+    if ctx["direction"] not in ("LONG", "SHORT", "unknown"):
         return None
-    entry = _sf(
-        trade.get("entry_price")
-        or trade.get("open_price")
-        or trade.get("entry")
-        or (trade.get("entry") or {}).get("price")
-    )
-    sl = _sf(
-        trade.get("sl_price")
-        or trade.get("stop_loss")
-        or trade.get("sl")
-        or (trade.get("risk") or {}).get("sl_price")
-    )
-    tp1 = _sf(
-        trade.get("tp1")
-        or trade.get("tp1_price")
-        or (trade.get("targets") or {}).get("tp1")
-    )
-    tp2 = _sf(
-        trade.get("tp2")
-        or trade.get("tp2_price")
-        or (trade.get("targets") or {}).get("tp2")
-    )
-    tp3 = _sf(
-        trade.get("tp3")
-        or trade.get("tp3_price")
-        or (trade.get("targets") or {}).get("tp3")
-    )
-    if entry <= 0 or sl <= 0 or tp1 <= 0:
+    if ctx["entry"] <= 0 or ctx["sl"] <= 0 or ctx["tp1"] <= 0:
         return None
-    source = trade.get("source") or trade.get("engine") or "paper_trade_engine"
-    confidence = trade.get("confidence")
-    ctx = trade.get("context_at_open") or trade.get("context") or trade.get("source_context") or {}
-    scenario = ctx.get("scenario") or trade.get("scenario") or "?"
-    q9 = ctx.get("gate_grade") or trade.get("quality_tier") or "?"
-    rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0.0
-    opened_at = trade.get("open_ts") or trade.get("entry_ts") or int(time.time() * 1000)
+    warning_text = ctx["warning"]
+    if ctx["rr_text"] == "invalid" and warning_text == "none":
+        warning_text = "missing_rr_inputs"
     return (
-        "NurtacCoreEngine Paper Trade Açıldı\n"
+        "🧠 NurtacCoreEngine Paper Trade Açıldı\n\n"
         f"Symbol: {SYMBOL}\n"
-        f"Direction: {direction}\n"
-        f"Entry: {entry:.2f}\n"
-        f"SL: {sl:.2f}\n"
-        f"TP1: {tp1:.2f}\n"
-        f"TP2: {tp2:.2f}\n"
-        f"TP3: {tp3:.2f}\n"
-        f"Setup ID: {setup_id or trade_id}\n"
-        f"Source: {source}\n"
-        f"Confidence: {confidence if confidence is not None else 'n/a'}\n"
-        f"Scenario: {scenario}\n"
-        f"Q9: {q9}\n"
-        f"Risk/RR: {rr:.2f}\n"
-        f"Time: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(opened_at/1000))}\n"
+        f"Direction: {ctx['direction']}\n"
+        f"Entry: {ctx['entry']:.2f}\n"
+        f"SL: {ctx['sl']:.2f}\n"
+        f"TP1: {ctx['tp1']:.2f}\n"
+        f"TP2: {ctx['tp2']:.2f}\n"
+        f"TP3: {ctx['tp3']:.2f}\n"
+        f"RR: {ctx['rr_text']}\n\n"
+        f"Confidence: {ctx['confidence']}\n"
+        f"Decision: {ctx['decision']}\n"
+        f"Scenario: {ctx['scenario']}\n"
+        f"Scenario Direction: {ctx['scenario_direction']}\n"
+        f"Scenario Status: {ctx['scenario_status']}\n"
+        f"Q9: {ctx['q9_reason']}\n\n"
+        "Order Flow:\n"
+        f"* Trend 1S: {ctx['order_flow']['trend_1s']}\n"
+        f"* Trend 1M: {ctx['order_flow']['trend_1m']}\n"
+        f"* Micro BOS: {ctx['order_flow']['micro_bos']}\n"
+        f"* Gate: {ctx['order_flow']['gate_grade']}\n"
+        f"* Price Location: {ctx['order_flow']['price_loc']}\n"
+        f"* Bias: {ctx['order_flow']['dom_bias']}\n"
+        f"* Cascade: {ctx['order_flow']['cascade']}\n"
+        f"* Session: {ctx['order_flow']['session']}\n\n"
+        "Observer:\n"
+        f"* State: {ctx['observer']['state']}\n"
+        f"* Event: {ctx['observer']['event']}\n"
+        f"* Setup ID: {ctx['source_setup_id']}\n"
+        f"* Qualified ID: {ctx['qualified_setup_id']}\n\n"
+        "Trade Brain Explanation:\n"
+        "Bu trade açıldı çünkü:\n"
+        f"{ctx['explanation'][0]}\n"
+        f"{ctx['explanation'][1]}\n"
+        f"{ctx['explanation'][2]}\n\n"
+        "Health:\n"
+        f"* Context source: {ctx['context_source']}\n"
+        f"* Warning: {warning_text}\n"
     )
 
 # ── Signal Message ─────────────────────────────────────────────────────────────
