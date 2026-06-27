@@ -21,6 +21,35 @@ BRAIN_FILE = DATA / "trade_brain_output.jsonl"
 BRAIN_SETUPS = DATA / "trade_brain_setups.jsonl"
 
 
+def _read_best_recent(path: str | Path, window_s: int = 10) -> dict:
+    """Son window_s saniyede gelen en güçlü (non-none) kaydı döndür."""
+    import subprocess, time
+    NOW = time.time()
+    cutoff = NOW - window_s
+    best = {}
+    best_score = -1
+    try:
+        raw = subprocess.getoutput(f"tail -30 {path} 2>/dev/null")
+        for line in raw.splitlines():
+            try:
+                r = json.loads(line)
+                ts = r.get("ts", 0)
+                age = NOW - ts/1000 if ts > 1e12 else NOW - ts
+                if age > window_s:
+                    continue
+                lbl = r.get("label", "none")
+                if lbl in (None, "none", ""):
+                    continue
+                score = r.get("score", 0) or 0
+                if score > best_score:
+                    best_score = score
+                    best = r
+            except:
+                pass
+    except:
+        pass
+    return best
+
 def _read_json(path: str | Path) -> dict:
     p = Path(path)
     try:
