@@ -1199,7 +1199,7 @@ def run_batch() -> None:
                 tracker.admit(s, ts, obs_fh)
 
             s1s  = _latest_at_or_before(s1s_idx, ts)
-            s1s_bos = _latest_within_window(s1s_idx, ts, 5_000, "micro_bos")
+            s1s_bos = _latest_within_window(s1s_idx, ts, 10_000, "micro_bos")
             if s1s_bos is not None:
                 s1s = s1s_bos
             s1m  = _latest_at_or_before(s1m_idx, ts)
