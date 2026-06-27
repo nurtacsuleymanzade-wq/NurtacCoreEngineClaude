@@ -19,6 +19,7 @@ MIN_CONFIDENCE = 0.60
 COOLDOWN_S = 120
 BRAIN_FILE = DATA / "trade_brain_output.jsonl"
 BRAIN_SETUPS = DATA / "trade_brain_setups.jsonl"
+AUDIT_FILE = DATA / "trade_brain_decision_audit.jsonl"
 
 
 def _read_best_recent(path: str | Path, window_s: int = 30) -> dict:
@@ -79,6 +80,327 @@ def _sf(v, default=0.0) -> float:
 def _write_jsonl(path: Path, record: dict) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _normalize_direction(value) -> str:
+    if not value:
+        return "neutral"
+    v = str(value).lower()
+    if v in ("long", "bull", "bullish", "buy", "uptrend", "up"):
+        return "long"
+    if v in ("short", "bear", "bearish", "sell", "downtrend", "down"):
+        return "short"
+    return "neutral"
+
+
+def _bool_text(v) -> str:
+    return "true" if bool(v) else "false"
+
+
+def _as_list(value):
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _load_latest_calibration() -> dict:
+    raw = _read_json(DATA / "calibration_profiles.json")
+    overall = raw.get("overall") or {}
+    by_direction = raw.get("by_direction") or {}
+    return {
+        "win_rate": overall.get("win_rate_observed"),
+        "sample_count": overall.get("sample_count"),
+        "by_direction": by_direction,
+        "raw": raw,
+    }
+
+
+def build_decision_audit(decision_record: dict, context_sources: dict) -> dict:
+    ev = context_sources.get("evidence") or {}
+    gate = context_sources.get("gate") or {}
+    s1s = context_sources.get("structure_1s") or {}
+    s1m = context_sources.get("structure_1m") or {}
+    scen = context_sources.get("scenario") or {}
+    zone = context_sources.get("zone") or {}
+    vp = context_sources.get("volume_profile") or {}
+    bias = context_sources.get("bias") or {}
+    regime = context_sources.get("regime") or {}
+    liq = context_sources.get("liquidity") or {}
+    calibration = context_sources.get("calibration") or {}
+
+    decision = str(decision_record.get("decision", "neutral")).lower()
+    final_score = _sf(decision_record.get("confidence"))
+    long_score = _sf(decision_record.get("long_prob"))
+    short_score = _sf(decision_record.get("short_prob"))
+    score_gap = abs(long_score - short_score)
+    confidence = final_score
+
+    # Evidence breakdown map
+    score_breakdown = _as_list((ev.get("score_breakdown") or {}))
+    sb = ev.get("score_breakdown") or {}
+    long_components = {
+        "candle_dna_long": _sf(sb.get("candle_dna_long")),
+        "gate_long": _sf(sb.get("gate_long")),
+        "smart_money_long": _sf(sb.get("smart_money_long")),
+        "detector_long": _sf(sb.get("detector_long")),
+        "baseline_long": _sf(sb.get("baseline_long")),
+        "market_context_long": _sf(sb.get("market_context_long")),
+        "volume_profile_long": _sf(sb.get("volume_profile_long")),
+        "scenario_long": _sf(sb.get("scenario_long")),
+        "macro": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("long_contribution")),
+        "whale": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("whale_pressure") == "buy"),
+        "etf": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("etf_signal") == "BULLISH"),
+        "coinbase_premium": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("coinbase_signal") in ("POSITIVE", "BULLISH")),
+        "liquidation_magnet": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("liq_magnet_above")),
+    }
+    short_components = {
+        "candle_dna_short": _sf(sb.get("candle_dna_short")),
+        "gate_short": _sf(sb.get("gate_short")),
+        "smart_money_short": _sf(sb.get("smart_money_short")),
+        "detector_short": _sf(sb.get("detector_short")),
+        "baseline_short": _sf(sb.get("baseline_short")),
+        "market_context_short": _sf(sb.get("market_context_short")),
+        "volume_profile_short": _sf(sb.get("volume_profile_short")),
+        "scenario_short": _sf(sb.get("scenario_short")),
+        "macro": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("short_contribution")),
+        "whale": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("whale_pressure") == "sell"),
+        "etf": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("etf_signal") == "BEARISH"),
+        "coinbase_premium": _sf((ev.get("evidence_components") or {}).get("macro_context", {}).get("coinbase_signal") == "NEGATIVE"),
+        "liquidation_magnet": _sf((ev.get("evidence_components") or {}).get("liquidation_context", {}).get("liq_magnet_below")),
+    }
+
+    supporting = []
+    opposing = []
+    neutral = []
+    contradictions = []
+    warnings = []
+    missing_sources = []
+
+    trend_1s = _normalize_direction(s1s.get("trend", {}).get("direction"))
+    trend_1m = _normalize_direction(s1m.get("trend", {}).get("direction"))
+    micro_bos = _normalize_direction((s1s.get("bos") or {}).get("micro_bos"))
+    dominant_direction = _normalize_direction(gate.get("dominant_direction") or ev.get("dominant_side"))
+    scenario_dir = _normalize_direction(scen.get("dominant_direction"))
+    price_loc = str(zone.get("price_location") or ev.get("evidence_components", {}).get("baseline", {}).get("vwap_side") or "unknown")
+    poc_rel = str(vp.get("price_vs_poc") or "not_available")
+    session = str(regime.get("session") or "not_available")
+    bias_dir = _normalize_direction(bias.get("dominant_bias"))
+    cascade = str(liq.get("cascade_risk") or "not_available")
+
+    # Supporting / opposing / neutral
+    if decision == "long":
+        if _sf(sb.get("candle_dna_long")) > _sf(sb.get("candle_dna_short")):
+            supporting.append("candle_dna_long > candle_dna_short")
+        else:
+            opposing.append("candle_dna_short >= candle_dna_long")
+        if _normalize_direction(gate.get("dominant_direction")) == "long":
+            supporting.append("gate dominant_direction bullish")
+        elif gate.get("setup_grade") in ("A", "B", "C"):
+            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
+        else:
+            neutral.append(f"gate={gate.get('setup_grade', 'none')}")
+        if trend_1m == "long":
+            supporting.append("trend_1m uptrend")
+        elif trend_1m == "short":
+            opposing.append("trend_1m downtrend")
+        else:
+            neutral.append("trend_1m ranging")
+        if micro_bos == "long":
+            supporting.append("micro_bos bullish")
+        elif micro_bos == "short":
+            opposing.append("micro_bos bearish")
+        else:
+            neutral.append("micro_bos=None")
+        if price_loc in ("demand", "below_poc", "below_value", "at_val"):
+            supporting.append(f"price_location={price_loc}")
+        elif price_loc in ("supply", "above_poc", "above_value", "at_vah"):
+            opposing.append(f"price_location={price_loc}")
+        else:
+            neutral.append(f"price_location={price_loc}")
+        if scenario_dir == "long":
+            supporting.append("scenario_direction bullish")
+        elif scenario_dir == "short":
+            opposing.append("scenario_direction bearish")
+        else:
+            neutral.append("scenario_direction neutral")
+        if _sf(calibration.get("win_rate")) > 50 and _sf(calibration.get("sample_count")) >= 30:
+            supporting.append("historical calibration supportive")
+        else:
+            opposing.append("historical calibration not supportive")
+    elif decision == "short":
+        if _sf(sb.get("candle_dna_short")) > _sf(sb.get("candle_dna_long")):
+            supporting.append("candle_dna_short > candle_dna_long")
+        else:
+            opposing.append("candle_dna_long >= candle_dna_short")
+        if _normalize_direction(gate.get("dominant_direction")) == "short":
+            supporting.append("gate dominant_direction bearish")
+        elif gate.get("setup_grade") in ("A", "B", "C"):
+            supporting.append(f"gate setup_grade={gate.get('setup_grade')}")
+        else:
+            neutral.append(f"gate={gate.get('setup_grade', 'none')}")
+        if trend_1m == "short":
+            supporting.append("trend_1m downtrend")
+        elif trend_1m == "long":
+            opposing.append("trend_1m uptrend")
+        else:
+            neutral.append("trend_1m ranging")
+        if micro_bos == "short":
+            supporting.append("micro_bos bearish")
+        elif micro_bos == "long":
+            opposing.append("micro_bos bullish")
+        else:
+            neutral.append("micro_bos=None")
+        if price_loc in ("supply", "above_poc", "above_value", "at_vah"):
+            supporting.append(f"price_location={price_loc}")
+        elif price_loc in ("demand", "below_poc", "below_value", "at_val"):
+            opposing.append(f"price_location={price_loc}")
+        else:
+            neutral.append(f"price_location={price_loc}")
+        if scenario_dir == "short":
+            supporting.append("scenario_direction bearish")
+        elif scenario_dir == "long":
+            opposing.append("scenario_direction bullish")
+        else:
+            neutral.append("scenario_direction neutral")
+        if _sf(calibration.get("win_rate")) > 50 and _sf(calibration.get("sample_count")) >= 30:
+            supporting.append("historical calibration supportive")
+        else:
+            opposing.append("historical calibration not supportive")
+    else:
+        neutral.extend([
+            f"gate={gate.get('setup_grade', 'none')}",
+            f"trend_1s={trend_1s}",
+            f"trend_1m={trend_1m}",
+            f"micro_bos={micro_bos}",
+            f"scenario_direction={scenario_dir}",
+            f"price_location={price_loc}",
+        ])
+
+    if gate.get("setup_grade") in (None, "", "none"):
+        warnings.append("gate_neutral")
+    if scen.get("scenario_count") in (None, 0):
+        warnings.append("no_active_scenario")
+    if decision != "neutral" and len(supporting) < 2:
+        warnings.append("evidence_neutral")
+
+    if _sf(calibration.get("win_rate")) <= 50 or _sf(calibration.get("sample_count")) < 30:
+        warnings.append("historical_not_supportive")
+
+    if trend_1m == "long" and decision == "short":
+        warnings.append("trend_conflict")
+    if trend_1m == "short" and decision == "long":
+        warnings.append("trend_conflict")
+    if dominant_direction != "neutral" and dominant_direction != decision:
+        warnings.append("direction_conflict")
+
+    if decision == "long" and trend_1m == "short":
+        contradictions.append("decision=LONG but trend_1m=downtrend")
+    if decision == "long" and dominant_direction == "short":
+        contradictions.append("decision=LONG but dominant_side=short")
+    if decision == "short" and _sf((ev.get("candle_dna") or {}).get("delta")) > 0:
+        contradictions.append("decision=SHORT but delta>0")
+    if decision == "short" and micro_bos == "long":
+        contradictions.append("decision=SHORT but micro_bos=bullish")
+    if decision == "long" and _sf((ev.get("candle_dna") or {}).get("delta")) < 0:
+        contradictions.append("decision=LONG but delta<0")
+    if decision == "long" and micro_bos == "short":
+        contradictions.append("decision=LONG but micro_bos=bearish")
+    if decision != "neutral" and _sf(calibration.get("win_rate")) <= 0:
+        contradictions.append("historical WR=0.0")
+
+    if not context_sources.get("evidence"):
+        missing_sources.append("evidence_stream")
+    if not context_sources.get("gate"):
+        missing_sources.append("decision_gate_output")
+    if not context_sources.get("structure_1s"):
+        missing_sources.append("structure_1s")
+    if not context_sources.get("structure_1m"):
+        missing_sources.append("structure_1m")
+    if not context_sources.get("scenario"):
+        missing_sources.append("scenarios")
+    if not context_sources.get("zone"):
+        missing_sources.append("zone_context")
+    if not context_sources.get("volume_profile"):
+        missing_sources.append("volume_profile")
+    if not context_sources.get("bias"):
+        missing_sources.append("bias_context")
+    if not context_sources.get("regime"):
+        missing_sources.append("regime_context")
+    if not context_sources.get("liquidity"):
+        missing_sources.append("liquidation_clusters")
+    if not calibration.get("raw"):
+        missing_sources.append("calibration_profiles")
+
+    if not supporting:
+        warnings.append("supporting_factors_empty")
+    if contradictions:
+        warnings.append("strong_contradiction")
+    if calibration.get("raw") and _sf(calibration.get("sample_count")) < 30:
+        warnings.append("missing_calibration")
+    if not calibration.get("raw") or calibration.get("win_rate") is None:
+        warnings.append("missing_probability")
+    if scenario_dir == "neutral":
+        warnings.append("scenario_neutral")
+    if bias_dir == "neutral":
+        neutral.append("bias=neutral")
+    if session == "not_available":
+        neutral.append("session=not_available")
+    if cascade == "not_available":
+        neutral.append("cascade=not_available")
+
+    quality = "weak"
+    if len(supporting) >= 5 and not contradictions:
+        quality = "strong"
+    elif len(supporting) >= 3 and len(contradictions) <= 1:
+        quality = "moderate"
+    elif len(supporting) >= 2:
+        quality = "partial"
+    if len(supporting) < 2 or len(contradictions) >= 3:
+        quality = "weak"
+
+    source_snapshot = {
+        "evidence_score_breakdown": ev.get("score_breakdown", {}),
+        "gate": gate,
+        "structure_1s": {"trend": s1s.get("trend"), "bos": s1s.get("bos")},
+        "structure_1m": {"trend": s1m.get("trend"), "bos": s1m.get("bos")},
+        "scenario": scen,
+        "context": {
+            "price_location": price_loc,
+            "poc_relation": poc_rel,
+            "regime": regime.get("regime") or regime.get("market_regime") or "not_available",
+            "session": session,
+            "bias": bias.get("dominant_bias") or "not_available",
+            "cascade": cascade,
+        },
+        "calibration": calibration.get("raw") or "not_available",
+    }
+
+    decision_reason = decision_record.get("questions", {}).get("Q8_probability", {}).get("reason")
+    if not decision_reason:
+        decision_reason = f"{decision.upper()} via long={long_score:.3f} short={short_score:.3f}"
+
+    return {
+        "engine": "trade_brain_decision_audit",
+        "symbol": decision_record.get("symbol", SYMBOL),
+        "ts": decision_record.get("ts"),
+        "decision": decision,
+        "confidence": round(confidence, 3),
+        "final_score": round(final_score, 3),
+        "long_score": round(long_score, 3),
+        "short_score": round(short_score, 3),
+        "score_gap": round(score_gap, 3),
+        "decision_reason": decision_reason,
+        "supporting_factors": supporting,
+        "opposing_factors": opposing,
+        "neutral_factors": neutral,
+        "contradictions": contradictions,
+        "missing_sources": missing_sources,
+        "source_snapshot": source_snapshot,
+        "quality": quality,
+        "warnings": warnings,
+    }
 
 
 def analyze_market() -> dict:
@@ -387,12 +709,32 @@ def main() -> None:
                 continue
 
             _write_jsonl(BRAIN_FILE, result)
+            audit_context = {
+                "evidence": _read_json(DATA / "evidence_stream.jsonl"),
+                "gate": _read_json(DATA / "decision_gate_output.jsonl"),
+                "structure_1s": _read_json(DATA / "structure_1s.jsonl"),
+                "structure_1m": _read_json(DATA / "structure_1m.jsonl"),
+                "scenario": _read_json(DATA / "scenarios.jsonl"),
+                "zone": _read_json(DATA / "zone_context.json"),
+                "volume_profile": _read_json(DATA / "volume_profile.json"),
+                "bias": _read_json(DATA / "bias_context.jsonl"),
+                "regime": _read_json(DATA / "regime_context.jsonl"),
+                "liquidity": _read_json(DATA / "liquidation_clusters.jsonl"),
+                "calibration": _load_latest_calibration(),
+            }
+            audit_record = build_decision_audit(result, audit_context)
+            _write_jsonl(AUDIT_FILE, audit_record)
 
             now = time.time()
             if now - last_print >= 30:
                 print(
                     f"[TB] {result['decision'].upper():<7} conf={result['confidence']:.2f} "
                     f"price={result['current_price']:.2f}",
+                    flush=True,
+                )
+                print(
+                    f"[TB] AUDIT {audit_record['decision'].upper():<7} "
+                    f"quality={audit_record['quality']} contradictions={len(audit_record['contradictions'])}",
                     flush=True,
                 )
                 last_print = now
