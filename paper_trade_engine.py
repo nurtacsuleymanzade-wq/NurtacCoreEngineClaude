@@ -127,6 +127,44 @@ def _append_jsonl(path: Path, rec: dict) -> None:
     except OSError:
         pass
 
+def _set_blocker(state: TradeState, blocker: str, setup: dict | None = None,
+                 fields: dict | None = None) -> None:
+    state.last_blocker = blocker
+    state.last_blocker_setup_id = (
+        (setup or {}).get("qualified_setup_id")
+        or (setup or {}).get("source_setup_id")
+        or (setup or {}).get("setup_id")
+    )
+    state.last_blocker_fields = fields or {}
+
+def _normalize_qualified_setup(rec: dict) -> dict:
+    raw = rec if isinstance(rec, dict) else {}
+    entry_obj = raw.get("entry") or {}
+    risk_obj = raw.get("risk") or {}
+    tgt_obj = raw.get("targets") or {}
+    ctx_obj = raw.get("context_at_qualification") or raw.get("context") or {}
+    setup_id = raw.get("qualified_setup_id") or raw.get("setup_id") or raw.get("source_setup_id") or ""
+    direction = raw.get("direction") or raw.get("side") or ""
+    return {
+        "qualified_setup_id": raw.get("qualified_setup_id"),
+        "source_setup_id": raw.get("source_setup_id"),
+        "qualification_ts": raw.get("qualification_ts"),
+        "status": raw.get("status", "open"),
+        "setup_type": raw.get("setup_type", "normal"),
+        "setup_id": setup_id,
+        "direction": direction,
+        "entry_price": _sf(entry_obj.get("price") or raw.get("entry_price") or raw.get("close_price") or entry_obj.get("recommended_entry"), 0.0),
+        "sl_price": _sf(risk_obj.get("sl_price") or raw.get("sl_price") or raw.get("stop_loss") or raw.get("sl"), 0.0),
+        "tp1": _sf(tgt_obj.get("tp1") or raw.get("tp1") or raw.get("take_profit_1"), 0.0),
+        "tp2": _sf(tgt_obj.get("tp2") or raw.get("tp2") or raw.get("take_profit_2"), 0.0) or None,
+        "tp3": _sf(tgt_obj.get("tp3") or raw.get("tp3") or raw.get("take_profit_3"), 0.0) or None,
+        "quality_tier": raw.get("quality_tier", "L1_LOW"),
+        "confidence": _sf(raw.get("confidence"), 0.0) if raw.get("confidence") is not None else None,
+        "source": raw.get("engine") or "qualified_setups",
+        "raw": raw,
+        "context": ctx_obj,
+    }
+
 def calc_position_size(balance: float, tier: str, sl_pct: float,
                        entry_price: float = 0.0) -> dict:
     risk_pct = TIER_RISK_PCT.get(tier, 0.01)
@@ -179,9 +217,24 @@ def _risk_gate(setup: dict) -> tuple[bool, str, float]:
 
     risk_obj = setup.get("risk") or {}
     tgt_obj  = setup.get("targets") or {}
-    entry = float(entry_d.get("price") or entry_d.get("recommended_entry") or 0)
-    sl    = float((setup.get("risk") or {}).get("sl_price") or sl_d.get("price") or 0)
-    tp1   = float((setup.get("targets") or {}).get("tp1") or tp1_d.get("price") or 0)
+    entry = float(
+        setup.get("entry_price")
+        or (entry_d.get("price") if isinstance(entry_d, dict) else 0)
+        or (entry_d.get("recommended_entry") if isinstance(entry_d, dict) else 0)
+        or 0
+    )
+    sl = float(
+        setup.get("sl_price")
+        or (risk_obj.get("sl_price") if isinstance(risk_obj, dict) else 0)
+        or (sl_d.get("price") if isinstance(sl_d, dict) else 0)
+        or 0
+    )
+    tp1 = float(
+        setup.get("tp1")
+        or (tgt_obj.get("tp1") if isinstance(tgt_obj, dict) else 0)
+        or (tp1_d.get("price") if isinstance(tp1_d, dict) else 0)
+        or 0
+    )
 
     if entry <= 0 or sl <= 0 or tp1 <= 0:
         return False, f"MISSING_PRICES entry={entry} sl={sl} tp1={tp1}", 0.0
@@ -237,6 +290,9 @@ class TradeState:
         self.missing_inputs: list[str] = []
         self.warnings:       list[str] = []
         self.errors:         list[str] = []
+        self.last_blocker: str | None = None
+        self.last_blocker_setup_id: str | None = None
+        self.last_blocker_fields: dict = {}
         # Streak tracking
         self.consec_wins:         int = 0
         self.consec_losses:       int = 0
@@ -354,6 +410,7 @@ def is_qualified_setup_record(setup: dict) -> bool:
     return True
 
 def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
+    setup = _normalize_qualified_setup(setup)
     # C1: status
     status = setup.get("status", "open")
     if status != "open":
@@ -370,23 +427,28 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     # C2: not already processed
     src_id = setup.get("qualified_setup_id") or setup.get("source_setup_id") or setup.get("setup_id", "")
     if not src_id or src_id in state.processed_setup_ids:
+        _set_blocker(state, "cursor_waiting_new_setup", setup, {"src_id": src_id})
         return False
 
     # C4: direction valid
     direction = setup.get("direction")
     if direction not in ("long", "short"):
+        _set_blocker(state, "schema_mismatch_fixed_but_waiting_new_setup", setup, {"direction": direction})
         return False
     if not is_qualified_setup_record(setup):
+        _set_blocker(state, "schema_mismatch_fixed_but_waiting_new_setup", setup, {"qualified": False})
         return
     # C5: entry price > 0
     entry_obj  = setup.get("entry") or {}
-    open_price = _sf(entry_obj.get("recommended_entry"), 0.0)
+    open_price = _sf(setup.get("entry_price") or entry_obj.get("price") or entry_obj.get("recommended_entry"), 0.0)
     if open_price <= 0:
+        _set_blocker(state, "missing_entry_or_sl_or_tp1", setup, {"entry_price": open_price})
         return False
 
     # C3: max open trades
     if len(state.open_trades) >= MAX_OPEN_TRADES:
         print("[PAPER] Max open trades reached", flush=True)
+        _set_blocker(state, "max_open_trades_reached", setup, {"current_open": len(state.open_trades)})
         return False
 
     state.processed_setup_ids.add(src_id)
@@ -395,13 +457,18 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     tgt_obj  = setup.get("targets") or {}
     ctx_obj  = setup.get("context_at_qualification") or {}
 
-    sl_price  = _sf(risk_obj.get("sl_price"),  0.0)
+    sl_price  = _sf(setup.get("sl_price") or risk_obj.get("sl_price"),  0.0)
     atr_used  = _sf(risk_obj.get("atr_used"),  0.0)
-    tp1_price = _sf(tgt_obj.get("tp1"),        0.0)
-    tp2_price = _sf(tgt_obj.get("tp2"),        0.0)
-    tp3_price = _sf(tgt_obj.get("tp3"),        0.0)
+    tp1_price = _sf(setup.get("tp1") or tgt_obj.get("tp1"),        0.0)
+    tp2_price = _sf(setup.get("tp2") or tgt_obj.get("tp2"),        0.0)
+    tp3_price = _sf(setup.get("tp3") or tgt_obj.get("tp3"),        0.0)
+    if sl_price <= 0 or tp1_price <= 0:
+        _set_blocker(state, "missing_entry_or_sl_or_tp1", setup, {"entry_price": open_price, "sl_price": sl_price, "tp1_price": tp1_price})
+        return False
     rg_pass, rg_reason, rg_rr = _risk_gate(setup)
     if not rg_pass:
+        blocker = "rr_too_low" if "RR_TOO_LOW" in rg_reason else "risk_gate_blocked"
+        _set_blocker(state, blocker, setup, {"reason": rg_reason, "rr": rg_rr, "entry_price": open_price, "sl_price": sl_price, "tp1_price": tp1_price})
         print(f"[PAPER] RISK_GATE BLOCK: {rg_reason}", flush=True)
         return False
     setup_type      = setup.get("setup_type", "normal")
@@ -492,6 +559,7 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     state.open_trades[trade["trade_id"]] = trade
     state.total_opened += 1
     state.last_trade_open_ts = open_ts
+    _set_blocker(state, "", setup, {})
 
     _print_open(trade)
     return True
@@ -910,6 +978,9 @@ def _write_health(state: TradeState) -> None:
         "total_trades_opened":  state.total_opened,
         "total_trades_closed":  state.total_closed,
         "current_open":         len(state.open_trades),
+        "last_blocker":         state.last_blocker,
+        "last_blocker_setup_id": state.last_blocker_setup_id,
+        "last_blocker_fields":  state.last_blocker_fields,
         "last_trade_open_ts":   state.last_trade_open_ts,
         "last_trade_close_ts":  state.last_trade_close_ts,
         "last_price_ts":        state.last_price_ts,
@@ -1005,7 +1076,13 @@ def restore_state(state: TradeState) -> None:
             with open(OPEN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            data = {}
+            bak = OPEN_FILE.with_name(f"{OPEN_FILE.name}.bak.{int(time.time())}")
+            try:
+                OPEN_FILE.replace(bak)
+            except Exception:
+                pass
+            data = {"generated_at": time.time(), "open_count": 0, "trades": []}
+            _safe_write_json(OPEN_FILE, data)
         for t in (data.get("trades") or []):
             sid = t.get("source_setup_id")
             if sid:
