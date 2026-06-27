@@ -755,7 +755,7 @@ class ObservedSetup:
             macro_bullish = macro_ctx.get("dominant_bias") == "long"
             trend_1m_up = ((s1m or {}).get("trend", {}).get("direction") == "uptrend")
             f1 = (delta > 0) or (macro_bullish and trend_1m_up)
-            f2 = (trend_1s == "uptrend" or micro_bos == "bullish")
+            f2 = (trend_1s == "uptrend" or micro_bos == "bullish" or trend_1m_dir == "uptrend")
             # zone_engine: demand/supply/fvg/neutral/above_poc  
             f3 = cur_loc in ("demand", "fvg", "neutral", "at_poc", "above_poc",
                              "inside_value", "above_value", "at_vah")  # her iki format
@@ -766,7 +766,7 @@ class ObservedSetup:
             macro_bearish = macro_ctx.get("dominant_bias") == "short"
             trend_1m_down = ((s1m or {}).get("trend", {}).get("direction") == "downtrend")
             f1 = (delta < 0) or (macro_bearish and trend_1m_down)
-            f2 = (trend_1s == "downtrend" or micro_bos == "bearish")
+            f2 = (trend_1s == "downtrend" or micro_bos == "bearish" or trend_1m_dir == "downtrend")
             # zone_engine: demand/supply/fvg/neutral/above_poc
             # Eski: inside_value/below_value/at_val/at_poc (artık kullanılmıyor)
             f3 = cur_loc in ("demand", "fvg", "neutral", "at_poc", "below_poc",
