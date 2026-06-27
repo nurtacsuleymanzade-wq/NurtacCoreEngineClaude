@@ -463,6 +463,20 @@ def try_open_trade(state: TradeState, setup: dict, trades_fh) -> bool:
     open_price = _sf(setup.get("entry_price") or entry_obj.get("price") or entry_obj.get("recommended_entry"), 0.0)
     if open_price <= 0:
         _set_blocker(state, "missing_entry_or_sl_or_tp1", setup, {"entry_price": open_price})
+    # C5b: Anlık fiyat entry'den çok uzaksa açma (slippage kontrolü)
+    try:
+        import subprocess as _sp2, json as _j2
+        _dna = _j2.loads(_sp2.getoutput("tail -1 data/combined_1s_dna_btcusdt.jsonl 2>/dev/null"))
+        _close = (_dna.get("candle_dna") or {}).get("close") or {}
+        _cur_price = float(_close.get("price",0) if isinstance(_close,dict) else _close or 0)
+        if _cur_price > 0 and open_price > 0:
+            _slip_pct = abs(_cur_price - open_price) / open_price
+            if _slip_pct > 0.005:  # %0.5'ten fazla kaymışsa açma
+                _set_blocker(state, "price_slippage_too_high", setup,
+                    {"entry": open_price, "current": _cur_price, "slip_pct": round(_slip_pct*100,2)})
+                return False
+    except Exception:
+        pass
         return False
 
     # C3: max open trades
