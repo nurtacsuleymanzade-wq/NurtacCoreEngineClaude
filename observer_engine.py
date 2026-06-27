@@ -372,6 +372,11 @@ class ObservedSetup:
         bos_1s    = (s1s or {}).get("bos") or {}
         trend_1s  = ((s1s or {}).get("trend") or {})
         micro_bos = bos_1s.get("micro_bos")
+        # F2 için recent window: son 10s içinde micro_bos geldi mi?
+        if not micro_bos and s1s_idx:
+            _s1s_recent = _latest_within_window(s1s_idx, ts, 10_000, "micro_bos")
+            if _s1s_recent:
+                micro_bos = (_s1s_recent.get("bos") or {}).get("micro_bos")
         trend_1s_dir = trend_1s.get("direction", "unknown")
 
         s1m_trend    = ((s1m or {}).get("trend") or {})
