@@ -372,11 +372,7 @@ class ObservedSetup:
         bos_1s    = (s1s or {}).get("bos") or {}
         trend_1s  = ((s1s or {}).get("trend") or {})
         micro_bos = bos_1s.get("micro_bos")
-        # F2 için recent window: son 10s içinde micro_bos geldi mi?
-        if not micro_bos and s1s_idx:
-            _s1s_recent = _latest_within_window(s1s_idx, ts, 10_000, "micro_bos")
-            if _s1s_recent:
-                micro_bos = (_s1s_recent.get("bos") or {}).get("micro_bos")
+        # F2 için recent window: live mode'da s1s zaten latest_at_or_before ile geliyor
         trend_1s_dir = trend_1s.get("direction", "unknown")
 
         s1m_trend    = ((s1m or {}).get("trend") or {})
@@ -1118,7 +1114,7 @@ class SetupTracker:
             oldest_id = min(self.active, key=lambda k: self.active[k].opened_ts)
             old = self.active.pop(oldest_id)
             old._transition(ts, "EXPIRED", "MAX_SETUPS_EXCEEDED",
-                            "Max 10 concurrent setups reached", 0.0, obs_fh)
+                            "Max concurrent setups reached", 0.0, obs_fh)
 
         self.active[sid] = ObservedSetup(setup, ts)
         if str(setup.get("setup_type", "")).startswith("liq_"):
