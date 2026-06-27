@@ -1152,8 +1152,16 @@ def run_batch() -> None:
 
     # Warm-up: load only last N lines per file (memory-efficient)
     primary_recs = _read_last_n_jsonl(PRIMARY_FILE, maxlen=300)
-    setup_recs   = _read_last_n_jsonl(SETUPS_FILE, maxlen=100)
-    liq_setup_recs = _read_last_n_jsonl(LIQ_SETUPS_FILE, maxlen=50)
+    import time as _time
+    _warmup_cutoff = int(_time.time() * 1000) - 120_000
+    setup_recs = [
+        r for r in _read_last_n_jsonl(SETUPS_FILE, maxlen=100)
+        if int(r.get("window_start_ts") or 0) >= _warmup_cutoff
+    ]
+    liq_setup_recs = [
+        r for r in _read_last_n_jsonl(LIQ_SETUPS_FILE, maxlen=50)
+        if int(r.get("window_start_ts") or 0) >= _warmup_cutoff
+    ]
     s1s_idx      = _build_index(_read_last_n_jsonl(STRUCT_1S_FILE, maxlen=300))
     s1m_idx      = _build_index(_read_last_n_jsonl(STRUCT_1M_FILE, maxlen=100))
     vp1m_idx     = _build_index(_read_last_n_jsonl(VOL_1M_FILE, maxlen=100))
