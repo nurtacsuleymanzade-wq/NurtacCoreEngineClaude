@@ -19,6 +19,9 @@ CHECKS = {
     "structure_1s.jsonl": 15,
     "regime_context.jsonl": 15,
     "scenarios.jsonl": 15,
+    "setups.jsonl": 300,
+    "observations.jsonl": 300,
+    "trade_brain_output.jsonl": 30,
     "bias_context.jsonl": 60,
     "liquidation_clusters.jsonl": 120,
 }
