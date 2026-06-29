@@ -784,8 +784,28 @@ def analyze_market() -> dict:
     else:
         scores["Q9_market_intent"] = (0.5, 0.5, "Senaryo ve yon yok")
 
-    total_long = sum(v[0] for v in scores.values()) / len(scores)
-    total_short = sum(v[1] for v in scores.values()) / len(scores)
+    # Ağırlıklı ortalama — Q8 Evidence en güvenilir, Q2 Trend önemli
+    WEIGHTS = {
+        "Q1_market_location": 1.0,
+        "Q2_trend": 2.0,        # Trend önemli
+        "Q3_liquidity": 1.0,
+        "Q4_acceptance": 0.5,   # Anlık hareket, düşük ağırlık
+        "Q5_aggression": 0.5,   # Anlık hareket, düşük ağırlık
+        "Q6_absorption": 1.5,   # Önemli sinyal
+        "Q7_trapped": 1.0,
+        "Q8_probability": 3.0,  # Evidence en güvenilir
+        "Q9_market_intent": 1.5,  # Senaryo önemli
+    }
+    weighted_long = 0.0
+    weighted_short = 0.0
+    total_weight = 0.0
+    for k, v in scores.items():
+        w = WEIGHTS.get(k, 1.0)
+        weighted_long += v[0] * w
+        weighted_short += v[1] * w
+        total_weight += w
+    total_long = weighted_long / total_weight if total_weight > 0 else 0.5
+    total_short = weighted_short / total_weight if total_weight > 0 else 0.5
 
     if total_long >= MIN_CONFIDENCE and total_long > total_short:
         decision = "long"
